@@ -1,16 +1,31 @@
-""" """
+"""
+The Zarr node classes: ZarrGroup and ZarrArray.
+"""
 
 from __future__ import annotations  # Using class names for types without Ruff F821
+
 import json
 import math
+import atexit
+from concurrent.futures import ThreadPoolExecutor, Future
 
 import numpy as np
 
-from .stores import ReadableStore, WritableStore, ListableStore
+from .stores import BaseStore, ReadableStore, WritableStore, ListableStore
 from .codecs import create_ndarray_type, encode_array, decode_bytes
 
 
-def load_zarr(store: ReadableStore) -> ZarrNode:
+__all__ = ["open_zarr", "ZarrNode", "ZarrGroup", "ZarrArray"]
+
+
+# Create executor to allow parallel reads and writes
+# TODO: load it lazily, allow configuring number of workers
+executor = ThreadPoolExecutor(max_workers=8)
+atexit.register(lambda: executor.shutdown())
+
+
+def open_zarr(store: ReadableStore) -> ZarrNode:
+    """Open a zarr file using the given store."""
     return ZarrNode._from_path(store, "")
 
 
@@ -19,6 +34,13 @@ def join(*path_parts):
 
 
 class ZarrNode:
+    """The base class for ``ZarrGroup`` and ``ZarrArray``.
+
+    A zarr file is made up of nodes, where arrays are the lead nodes.
+    Each node is represented by a 'directory' and a corresponding 'zarr.json'
+    that contains information about the node.
+    """
+
     def __init__(
         self,
         store: ReadableStore | ListableStore | WritableStore,
@@ -54,7 +76,7 @@ class ZarrNode:
         return self._one_line_repr()
 
     @classmethod
-    def _from_path(cls, store, path):
+    def _from_path(cls, store: BaseStore, path: str) -> ZarrNode:
         json_text = store.get(join(path, "zarr.json")).decode()
         metadata = json.loads(json_text)
 
@@ -70,22 +92,27 @@ class ZarrNode:
             raise RuntimeError(f"Unexpected node type {node_type!r}")
 
     @property
-    def store(self):
+    def store(self) -> BaseStore:
+        """The store for this node."""
         return self._store
 
     @property
     def name(self) -> str:
+        """The name of this node."""
         return self._name
 
     @property
     def path(self) -> str:
+        """The full path of this node in the store."""
         return self._path
 
     @property
-    def metadata(self):
+    def metadata(self) -> dict:
+        """The metadata as a dictionary."""
         return self._metadata
 
     def print_metadata(self):
+        """Print a readable representation of the metadata."""
         print(json.dumps(self._metadata, indent=4))
 
     def _one_line_repr(self):
@@ -99,6 +126,15 @@ class ZarrNode:
 
 
 class ZarrGroup(ZarrNode):
+    """The class that represents a group in a Zarr file.
+
+    The ``repr()`` of a group shows its children. One can navigate
+    the Zarr file by indexing:
+
+        zarr_group['path/to/node']
+
+    """
+
     def __repr__(self):
         return self.get_structure(max_depth=1)
 
@@ -107,16 +143,23 @@ class ZarrGroup(ZarrNode):
 
     @property
     def children(self) -> tuple[ZarrNode]:
+        """The child nodes of this group. These can be groups or arrays."""
         return tuple(self._children.values())
 
     @property
-    def attributes(self):
+    def attributes(self) -> dict:
+        """The attributes of this group. I.e. ``metadata["attributes"]``"""
         return self._attributes
 
-    def print_structure(self, max_depth=999):
+    def print_structure(self, max_depth: int = 999):
+        """Print the structure of the Zarr file from this group and below."""
         print(self.get_structure(max_depth=max_depth))
 
-    def get_structure(self, max_depth=999, indent=0):
+    def get_structure(self, max_depth: int = 999, indent: int = 0) -> str:
+        """Get the structure of this group as a human-readble string."""
+        max_depth = int(max_depth)
+        indent = int(indent)
+
         indent_str = " " * indent
         r = indent_str + self._one_line_repr()
         if self._children and max_depth > 0:
@@ -153,7 +196,7 @@ class ZarrGroup(ZarrNode):
         assert meta["node_type"] == "group"
 
         # Parse optional fields
-        self._attributes = meta.get("attributes", None)
+        self._attributes = meta.get("attributes", {})
 
     def _init_node(self):
         # Assume ListableStore
@@ -176,6 +219,12 @@ class ZarrGroup(ZarrNode):
 
 
 class ZarrArray(ZarrNode):
+    """The class that represents a Zarr array.
+
+    These arrays don't contain any bytes themselves, but are used as proxies
+    to load data from the store, and provide these as numpy arrays.
+    """
+
     # todo: could add info on chunks
 
     def _one_line_repr(self):
@@ -183,31 +232,53 @@ class ZarrArray(ZarrNode):
         return f"<{self.__class__.__name__} '{self._path}' {shape_str} {self.dtype} at {hex(id(self))}>"
 
     @property
+    def dtype(self) -> str:
+        """The datatype of the array."""
+        return self._dtype
+
+    @property
     def ndim(self) -> int:
+        """The number of dimensions of the array.``."""
         return len(self._shape)
 
     @property
     def shape(self) -> tuple[int, ...]:
+        """The shape of the array (ndim elements)."""
         return self._shape
 
     @property
-    def dtype(self) -> str:
-        return self._dtype
+    def size(self) -> int:
+        """The size of the array, in number of elements."""
+        return int(np.prod(self._shape))
 
     @property
     def chunk_grid_shape(self) -> tuple[int, ...]:
+        """The shape of the chunk grid (ndim elements)."""
         return self._chunk_grid_shape
 
     @property
     def chunk_shape(self) -> tuple[int, ...]:
+        """The shape of each chunk (ndim elements)."""
         return self._chunk_shape
 
     @property
     def chunk_size(self) -> int:
+        """The size of each chunk, in number of elements."""
         return int(np.prod(self._chunk_shape))
 
-    def get_chunk(self, *index):
+    # TODO: maybe rename to get_chunk_sync, and rename get_chunk_promise to get_chunk
+    def get_chunk(self, index) -> np.ndarray:
+        """Read a chunk.
+
+        Converts the index to the path for that chunk, load the bytes
+        from the store, and decode them into a numpy array. This
+        function is blocking (no threading or async).
+        """
+        # TODO: kwarg to return None when the chunk does not exist
+
         # Check index
+        if not isinstance(index, tuple):
+            raise TypeError(f"ZarrArray.get_chunk() needs a tuple index, got {index!r}")
         if len(index) != len(self._shape):
             raise IndexError(f"ZarrArray.get_chunk() needs {len(self._shape)} indices.")
         if not all(isinstance(i, int) for i in index):
@@ -224,35 +295,117 @@ class ZarrArray(ZarrNode):
         array_type = create_ndarray_type(self._chunk_shape, self._dtype)
         return decode_bytes(memoryview(encoded_bytes), self._codecs, array_type)
 
-    def set_chunk(self, value, *index, check_empty=True):
-        # Check index
-        if len(index) != len(self._shape):
-            raise IndexError(f"ZarrArray.get_chunk() needs {len(self._shape)} indices.")
-        if not all(isinstance(i, int) for i in index):
-            raise ValueError("ZarrArray.get_chunk() needs integer indices.")
+    def get_chunk_future(self, index) -> Future[np.ndarray]:
+        """Read a chunk and return a ``concurrent.futures.Future``.
 
-        # Check value
-        if not isinstance(value, np.ndarray):
+        The loading happens in a separate thread (using a ``ThreadPoolExecutor``).
+        One can wait for the result, and also combine multiple reads in parallel.
+
+        This has little to do with async programming and asyncio, although the future-object
+        can be converted to an awaitable using ``asyncio.wrap_future()``.
+
+        Example to wait for the data:
+
+            f = zarr_array.get_chunk_future(...)
+            data = f.result()
+
+        Combine multiple reads in parallel:
+
+            f1 = zarr_array.get_chunk_future(...)
+            f2 = zarr_array.get_chunk_future(...)
+            f3 = zarr_array.get_chunk_future(...)
+
+            data1, data2, data3 = [f.result() for f in [f1, f2, f3]]
+
+        Asynchronously await the data:
+
+            f = zarr_array.get_chunk_future(...)
+            data = await asyncio.wrap_future(f)
+
+        Async and parallel reads:
+
+            f1 = zarr_array.get_chunk_future(...)
+            f2 = zarr_array.get_chunk_future(...)
+            f3 = zarr_array.get_chunk_future(...)
+
+            asyncio_futures = [asyncio.wrap_future(f) for f in [f1, f2, f3]]
+            data1, data2, data3 = await asyncio.gather(*asyncio_futures)
+
+        """
+        return executor.submit(self.get_chunk, index)
+
+    def set_chunk(self, data, index, check_empty=True) -> None:
+        """Write a chunk to the store.
+
+        Converts the index to the path for that chunk. Encodes the array
+        to bytes, and save these to the store. This function is blocking
+        (no threading or async).
+        """
+
+        # Check index
+        if not isinstance(index, tuple):
+            raise TypeError(f"ZarrArray.set_chunk() needs a tuple index, got {index!r}")
+        if len(index) != len(self._shape):
+            raise IndexError(f"ZarrArray.set_chunk() needs {len(self._shape)} indices.")
+        if not all(isinstance(i, int) for i in index):
+            raise ValueError("ZarrArray.set_chunk() needs integer indices.")
+
+        # Check data
+        if not isinstance(data, np.ndarray):
             raise TypeError("A chunk should be a numpy array")
-        if not (value.shape == self._chunk_shape and value.dtype == self._dtype):
+        if not (data.shape == self._chunk_shape and data.dtype == self._dtype):
             raise ValueError(
-                f"Chunk must have shape {self._chunk_shape!r} and dtype {self._dtype!r}, but got {value.shape!r} and {value.dtype!r}"
+                f"Chunk must have shape {self._chunk_shape!r} and dtype {self._dtype!r}, but got {data.shape!r} and {data.dtype!r}"
             )
 
         # Write (or erase) the chunk
         path = self._path + "/c/" + self._chunk_separator.join(f"{x}" for x in index)
-        if check_empty and np.all(value == self._fill_value):
+        if check_empty and np.all(data == self._fill_value):
             try:
                 self._store.erase(path)
             except IOError:
                 pass
         else:
-            encoded_bytes = encode_array(value, self._codecs)
+            encoded_bytes = encode_array(data, self._codecs)
             self._store.set(path, encoded_bytes)
 
-    @property
-    def codec(self):
-        pass
+    def set_chunk_future(self, data, index) -> Future[None]:
+        """Write a chunk and return a ``concurrent.futures.Future``.
+
+        The writing happens in a separate thread (using a ``ThreadPoolExecutor``).
+        One can wait for the result, and also combine multiple writes in parallel.
+
+        This has little to do with async programming and asyncio, although the future-object
+        can be converted to an awaitable using ``asyncio.wrap_future()``.
+
+        Example to write and forget:
+
+            f = zarr_array.set_chunk_future(...)
+
+        Combine multiple writes in parallel, and wait for them to finish:
+
+            f1 = zarr_array.set_chunk_future(...)
+            f2 = zarr_array.set_chunk_future(...)
+            f3 = zarr_array.set_chunk_future(...)
+
+            [f.result() for f in [f1, f2, f3]]
+
+        Asynchronously await the data:
+
+            f = zarr_array.set_chunk_future(...)
+            await asyncio.wrap_future(f)
+
+        Async and parallel reads:
+
+            f1 = zarr_array.set_chunk_future(...)
+            f2 = zarr_array.set_chunk_future(...)
+            f3 = zarr_array.set_chunk_future(...)
+
+            asyncio_futures = [asyncio.wrap_future(f) for f in [f1, f2, f3]]
+            await asyncio.gather(*asyncio_futures)
+
+        """
+        return executor.submit(self.set_chunk, data, index)
 
     def _parse_metadata(self):
         meta = self._metadata
@@ -266,12 +419,12 @@ class ZarrArray(ZarrNode):
 
         self._chunk_grid = meta["chunk_grid"]
         assert self._chunk_grid["name"] == "regular"
-        self._chunk_shape = self._chunk_grid["configuration"]["chunk_shape"]
+        self._chunk_shape = tuple(self._chunk_grid["configuration"]["chunk_shape"])
 
         self._chunk_grid_shape = tuple(
             math.ceil(array_s / chunk_s)
             for array_s, chunk_s in zip(self._shape, self._chunk_shape, strict=True)
-        )
+        )  # TODO: rename to grid_shape?
 
         self._chunk_key_encoding = meta["chunk_key_encoding"]
         assert self._chunk_key_encoding["name"] == "default"
@@ -290,7 +443,3 @@ class ZarrArray(ZarrNode):
 
     def _init_node(self):
         pass
-
-
-class ZarrChunk:
-    pass
