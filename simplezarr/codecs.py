@@ -82,7 +82,7 @@ def create_ndarray_type(shape: tuple[int, ...], dtype: str):
     return type(
         name,
         (ArrayType,),
-        {"shape": shape, "dtype": dtype},
+        {"shape": tuple(shape), "dtype": dtype},
     )
 
 

@@ -1,11 +1,60 @@
 # simplezarr
 A simple, elegant, and efficient Zarr implementation
 
-The `simplezarr` library provides a simple way to use Zarr files. The code
-adheres close to the Zarr 3.0 standard. Extra functionality is provided in the form of functions in `simplezarr.utils`.
+The core of `simplezarr` implements the Zarr 3 spec in straightforward
+Python, without extra fuzz. This makes the code easy to follow, and gives
+predictable performance. Extra functionality is provided as functions and classes
+that are provided in `simplezarr.utils`.
 
-Compared to zarr-py, simplezarr keeps the code simple, providing easy access to data and metadata. This makes it easy
-to adopt in various use-cases. Although it may feel a bit more low-level, it is more flexible this way.
+Since `simplezarr` is nice and simple, it's easy to adopt in various
+use-cases. It supports parallel io, but does not force the use of asyncio.
 
-SimpleZarr makes no attempt to parallelize reads, and therefore is (perhaps surprisingly) faster than zarr-py.
-You can still parellize reads by using e.g. a `ThreadPoolExecutor` in your code.
+
+## Status
+
+* Stores are implemented, (except no remote stores yet).
+* Codecs are implemented (all except for sharding).
+* Main API can (asynchronously) read and write chunks.
+
+What is not yet supported:
+
+* Writing Zarr files.
+* Indexing (wip).
+
+
+## Motivation
+
+Zarr 3 is a great file format for large datasets. It's nice and elegant. In
+using Zarr via zarr-python, we ran into performance issues, and upon
+investigating what happens under the hood, we found it hard to follow the path
+that the code takes, especially regarding threading and asyncio. Granted, part
+of that complexity is because it must support older Zarr versions as well.
+
+We figured, what happens if we take the Zarr 3 spec, and just implemented as
+directly as possible?
+
+Another reason is that there seems to be no way to read individual blocks
+asynchronously (`AsyncArray.get_block_selection()` does not exist), which was a
+requirement for our application.
+
+### What zarr-python does
+
+* The store loads data using `asyncio.to_thread()`. This runs the io-bound reading of bytes in a separate thread (from the loop's default `ThreadPoolExecutor`).
+* It uses `asyncio.gather()` is parallelize concurrent reads/writes.
+* When using the `zarr.Array` (not `AsyncArray`), indexing is synchronous. To do this:
+  * It uses a dedicated asyncio loop that runs continuously in a dedicated thread.
+  * A dedicated `ThreadPoolExecutor` is set on that loop (which will be used to perform the store IO with).
+  * Then `asyncio.run_coroutine_threadsafe(the_asyncio_coroutine, dedicated_loop)` to turn the asyncio code into a `concurrent.futures.Future`.
+  * Then sync-wait on that future.
+
+It looks like this complexity is one of the reasons why the performance of ome-zarr is hard to get right. The ome-zarr library wraps zarr-python with Dask, which uses thread pools too, which results in a lot of threads being spawned.
+
+### What simplezarr does
+
+* Stores are synchronous.
+* `simplezarr.Array.get_chunk()` is synchronous (no threading or async).
+* `simplezarr.Array.get_chunk_future()` uses a `ThreadPoolExecutor`. It returns a `concurrent.futures.Future`. No asyncio anywhere.
+* This is enough to make it trivial to concurrently read multiple chunks.
+* And `asyncio` can be "enabled" using `await asyncio.wrap_future(f)`.
+
+This means that users has simple building blocks to integrate in any scenario, also without Asyncio or Trio.

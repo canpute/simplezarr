@@ -27,6 +27,16 @@ than "/a/b". We follow this in the stores.
 
 from pathlib import Path
 
+__all__ = [
+    "BaseStore",
+    "ReadableStore",
+    "WritableStore",
+    "ListableStore",
+    "MemoryStore",
+    "LocalStore",
+    "WrapperStore",
+]
+
 List = list  # for typing
 
 
@@ -435,5 +445,3 @@ class WrapperStore(ReadableStore, WritableStore, ListableStore):
 # class ZipStore:
 # class S3Store:
 # class HttpStore:
-
-# %%
