@@ -45,13 +45,13 @@ class ZarrNode:
         self,
         store: ReadableStore | ListableStore | WritableStore,
         path: str,
-        _metadata: dict | None = None,
+        metadata: dict | None = None,
     ):
         # Check path
-        if not isinstance(path, str):
+        if not isinstance(path, str):  # no-cover
             raise TypeError(f"{self.__class__.__name__} path must be str, got {path!r}")
         path = path.lstrip("/")
-        if path.endswith("/"):
+        if path.endswith("/"):  # no-cover
             raise ValueError(
                 f"{self.__class__.__name__} path must not end with '/' unless root, got {path!r}"
             )
@@ -60,16 +60,10 @@ class ZarrNode:
         self._path = path
         self._name = self._path.rsplit("/", 1)[-1]
 
-        # Get metadata as a dict
-        if _metadata is not None:
-            metadata = _metadata
-        else:
-            json_text = self._store.get(join(self._path, "zarr.json")).decode()
-            metadata = json.loads(json_text)
         assert isinstance(metadata, dict)
         self._metadata = metadata
-
         self._parse_metadata()
+
         self._init_node()
 
     def __repr__(self):
@@ -85,9 +79,9 @@ class ZarrNode:
 
         node_type = metadata["node_type"]
         if node_type == "group":
-            return ZarrGroup(store, path, _metadata=metadata)
+            return ZarrGroup(store, path, metadata=metadata)
         elif node_type == "array":
-            return ZarrArray(store, path, _metadata=metadata)
+            return ZarrArray(store, path, metadata=metadata)
         else:
             raise RuntimeError(f"Unexpected node type {node_type!r}")
 
@@ -115,7 +109,7 @@ class ZarrNode:
         """Print a readable representation of the metadata."""
         print(json.dumps(self._metadata, indent=4))
 
-    def _one_line_repr(self):
+    def _one_line_repr(self):  # no-cover
         return f"<{self.__class__.__name__} '{self._path}' at {hex(id(self))}>"
 
     def _parse_metadata(self):

@@ -5,7 +5,6 @@ import numpy as np
 import pytest
 
 
-
 # Create an in-memory zarr file
 
 store_data = {
@@ -25,7 +24,7 @@ store_data = {
             "node_type": "group"
         }
         """.encode(),
-    "sub/array1/zarr.json":"""
+    "sub/array1/zarr.json": """
         {
             "zarr_format": 3,
             "node_type": "array",
@@ -52,7 +51,7 @@ store_data = {
             "fill_value": "0"
         }
         """.encode(),
-    "sub/array2/zarr.json":"""
+    "sub/array2/zarr.json": """
         {
             "zarr_format": 3,
             "node_type": "array",
@@ -130,15 +129,27 @@ def test_zarr_group():
     assert sub["array1"] is g["sub/array1"]
     assert sub["array2"] is g["sub/array2"]
 
+    # Some props ...
+    assert g.store is store
+    assert g.name == ""
+    assert g.path == ""
+
+    assert sub.store is store
+    assert sub.name == "sub"
+    assert sub.path == "sub"
 
 
 def test_zarr_array1():
-
     g = open_zarr(store)
     a1 = g["sub/array1"]
 
     assert isinstance(a1, ZarrArray)
+    assert a1.ndim == 3
     assert a1.shape == (8, 6, 4)
+    assert a1.size == 8 * 6 * 4
+    assert a1.chunk_shape == (8, 6, 4)
+    assert a1.chunk_grid_shape == (1, 1, 1)
+    assert a1.chunk_size == 8 * 6 * 4
 
     chunk1 = a1.get_chunk((0, 0, 0))
     assert isinstance(chunk1, np.ndarray)
@@ -146,14 +157,26 @@ def test_zarr_array1():
     assert chunk1.dtype == np.uint16
     assert np.all(chunk1 == 100)
 
+    assert repr(a1).startswith("<ZarrArray ")
+    assert "uint16" in repr(a1)
+    assert "8x6x4" in repr(a1)
+
+    # Some props ...
+    assert a1.store is store
+    assert a1.name == "array1"
+    assert a1.path == "sub/array1"
+
 
 def test_zarr_array2():
-
     g = open_zarr(store)
     a2 = g["sub/array2"]
 
     assert isinstance(a2, ZarrArray)
     assert a2.shape == (100, 100)
+    assert a2.size == 10000
+    assert a2.chunk_shape == (50, 50)
+    assert a2.chunk_grid_shape == (2, 2)
+    assert a2.chunk_size == 50 * 50
 
     chunk1 = a2.get_chunk((0, 0))
     assert isinstance(chunk1, np.ndarray)
@@ -194,10 +217,3 @@ if __name__ == "__main__":
             func()
             print("done")
     print("all done")
-
-
-
-
-
-
-
