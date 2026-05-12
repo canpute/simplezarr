@@ -1,5 +1,12 @@
-from __future__ import annotations
+"""
+Implementation of a chunk pool, allowing asynchronous processing of chunks.
 
+The ChunkPool object keeps track of the individual chunks. Freeing the chunks when no longer used.
+Multiple ChunkManager objects can use the same pool. Via this objects, user-code can request the loading
+of chunks, and free chunks when no longer needed.
+"""
+
+from __future__ import annotations
 
 import asyncio
 from itertools import count as Counter  # noqa: N812
@@ -21,12 +28,12 @@ ref_counter = Counter()
 def create_chunk_pools_from_zarr_node(
     zarr_node: simplezarr.ZarrNode,
 ) -> list[ChunkPool]:
+    """Create ChunkPool objects from a given zarr node. Each multiscale image results in one pool."""
     multiscale_infos = create_scale_infos_from_zarr_node(zarr_node)
     pools = []
     for multiscale_info in multiscale_infos:
         pool = ChunkPool(multiscale_info)
         pools.append(pool)
-
     return pools
 
 
@@ -47,17 +54,21 @@ class ChunkPool:
 
     @property
     def multiscale_info(self) -> MultiscaleInfo:
-        """Get the object that represent the information on the multiscale image."""
+        """Get the object that represents the information on the multiscale image."""
         return self._multiscale_info
 
     def destroy(self):
         """Clear all chunks."""
+        # TODO: implement!
         raise NotImplementedError()
 
     def get_chunk(
         self, level: int, chunk_index: tuple[int, ...], ref: str
     ) -> ChunkSpot:
-        """Get a ChunkSpot object."""
+        """Get a ChunkSpot object.
+
+        The returned object represents the requested chunk, but the corresponding data is not loaded yet.
+        """
 
         chunk_spot = self._chunks[level].get(chunk_index, None)
         if chunk_spot is None:
@@ -68,7 +79,10 @@ class ChunkPool:
         return chunk_spot
 
     def drop_chunk(self, level: int, chunk_index: tuple[int, ...], ref: str) -> None:
-        """Tell the pool that you're done using the chunk spot at the given location."""
+        """Release a chunk.
+
+        Tell the pool that you're done using the chunk spot at the given location.
+        """
         chunk_spot = self._chunks[level].get(chunk_index, None)
         if chunk_spot is not None:
             has_refs = chunk_spot._drop_ref(ref)
@@ -77,6 +91,7 @@ class ChunkPool:
                 self._chunks[level].pop(chunk_index, None)
 
     def iter_chunks(self) -> Generator[ChunkSpot]:
+        """Iterate over all currently loaded chunks."""
         for chunks in self._chunks:
             for chunk in chunks.values():
                 yield chunk
@@ -107,7 +122,8 @@ class ChunkManager:
             self._chunks.append({})
 
     def __enter__(self):
-        assert self._unloaded_chunk_spots is None
+        if self._unloaded_chunk_spots is not None:
+            raise RuntimeError("Cannot use a ChunkManager in a with-statement twice.")
         self._unloaded_chunk_spots = []
         return self
 
@@ -140,7 +156,7 @@ class ChunkManager:
     def request_chunk_sync(self, level, chunk_index):
         """Request a chunk in a synchronous manner.
 
-        Must be called by using the manager in a ``switch`` statement. All
+        Must be called by using the manager in a ``with`` statement. All
         requested chunks within that statement are then loaded in parallel.
         """
         chunk_spot = self._chunks[level].get(chunk_index)
