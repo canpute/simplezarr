@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 import asyncio
-from itertools import count as Counter
+from itertools import count as Counter  # noqa: N812
 from concurrent.futures import wait as concurrent_wait
 from typing import Generator
 

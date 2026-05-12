@@ -15,7 +15,7 @@ from .stores import BaseStore, ReadableStore, WritableStore, ListableStore
 from .codecs import create_ndarray_type, encode_array, decode_bytes
 
 
-__all__ = ["open_zarr", "ZarrNode", "ZarrGroup", "ZarrArray"]
+__all__ = ["ZarrArray", "ZarrGroup", "ZarrNode", "open_zarr"]
 
 
 # Create executor to allow parallel reads and writes

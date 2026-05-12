@@ -29,12 +29,12 @@ from pathlib import Path
 
 __all__ = [
     "BaseStore",
-    "ReadableStore",
-    "WritableStore",
     "ListableStore",
-    "MemoryStore",
     "LocalStore",
+    "MemoryStore",
+    "ReadableStore",
     "WrapperStore",
+    "WritableStore",
 ]
 
 List = list  # for typing

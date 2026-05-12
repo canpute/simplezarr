@@ -1,39 +1,51 @@
-"""Support for multiscale images (most notably ome-zarr)."""
+"""Support for multiscale images, most notably ome-zarr.
+
+OME-Zarr, a.k.a. next-generation file format (NGFF) builds on Zarr version 3, to
+define hierarchical datasets. This module implements the "multiscales" metadata,
+ignoring the transitional "bioformats2raw.layout" and "omero" metadata. In its
+current form, the "labels", "plate" and "well" metadata are also ignored.
+
+The purpose of this module is to examine the metadata of a Zarr file and produce
+typed structures to easily process the data further.
+
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
 import simplezarr
-from simplezarr.utils.units import SPACE_UNITS, TIME_UNITS
+from simplezarr.utils.units import SPACE_UNITS
+from simplezarr.utils.logs import logger
+
+
+MSG_PREFIX = "simplezarr.utils.multiscale"
 
 
 @dataclass
 class MultiscaleInfo:
     """Represents a single multiscale image."""
 
-    name: str
-    unit: str
-    unit_factor: float  # TODO: USE app-specific scale factor
-    scales: list[ScaleInfo]
+    name: str  #: the name of this multiscale image
+    axes_names: tuple[str, ...]  #: the names of the axes/dimensions of the array
+    unit: str  #: the unit for the spatial dimension
+    unit_factor: float  #: the factor to map the unit to meters
+    scales: list[ScaleInfo]  #: more info per scale
 
 
 @dataclass
 class ScaleInfo:
     """Information that represents a single scale in a multiscale image."""
 
-    level: int
-    array: simplezarr.ZarrArray
-    path: str
-    ref_scale: float
-    spatial_shape: tuple[int, ...]
-    spatial_scale: tuple[float, ...]
-    spatial_offset: tuple[float, ...]
-    spatial_chunk_shape: tuple[float, ...]
-    nchannels: int
-    ntimes: int
-    numel: int
+    array: simplezarr.ZarrArray  #: the actual array object
+    level: int  #: the integer level in the multiscale stack, 0 being the highest-resolution
+    mean_scale: float  #: the reference scale for this scale layer in world units (the average of the spatial scales)
+    spatial_shape: tuple[int, ...]  #: The shape of the spatial dimensions
+    spatial_scale: tuple[float, ...]  #: the scale factor for the spatial dimensions
+    spatial_offset: tuple[float, ...]  #: the offset for the spatial dimensions
+    spatial_chunk_shape: tuple[float, ...]  # The chunk shape for the spatial dimensions
+    nchannels: int  #: the number of channels for this image
+    ntimes: int  #: the number of time-frames for this image
 
 
 def create_scale_infos_from_zarr_node(
@@ -45,14 +57,14 @@ def create_scale_infos_from_zarr_node(
     """
     # The ome-zarr spec: https://ngff.openmicroscopy.org/specifications/
 
-    zarr_info = zarr_node.metadata
-    if "ome" in zarr_info["attributes"]:
+    attributes = zarr_node.metadata.get("attributes", {})
+
+    if "ome" in attributes:
         return create_scale_infos_from_ome_zarr_group(zarr_node)
     elif isinstance(zarr_node, simplezarr.ZarrArray):
-        # TODO: test this code path
         return create_scale_infos_from_zarr_array(zarr_node)
     else:
-        raise RuntimeError(f"Cannot get scale infos from {zarr_node!r}")
+        raise TypeError(f"Cannot get scale infos from {zarr_node!r}")
 
 
 def create_scale_infos_from_zarr_array(
@@ -88,24 +100,29 @@ def create_scale_infos_from_zarr_array(
     full_scale = [1] * ndim
     full_translation = [0] * ndim
     spatial_scale = tuple(full_scale[-space_dims:])
-    ref_scale = sum(spatial_scale) / len(spatial_scale)
+    mean_scale = sum(spatial_scale) / len(spatial_scale)
 
     scale_info = ScaleInfo(
-        level=0,
         array=zarr_array,
-        path=zarr_array.path,
+        level=0,
+        mean_scale=mean_scale,
         spatial_offset=tuple(full_translation[-space_dims:]),
         spatial_scale=tuple(full_scale[-space_dims:]),
         spatial_shape=tuple(zarr_array.shape[-space_dims:]),
         spatial_chunk_shape=tuple(zarr_array.chunk_shape[-space_dims:]),
-        ref_scale=ref_scale,
         nchannels=zarr_array.shape[channel_dim] if channel_dim is not None else 0,
         ntimes=zarr_array.shape[time_dim] if time_dim is not None else 0,
-        numel=0,
     )
-    # TODO: set numel. Or remove that field??
 
-    return [MultiscaleInfo("", [scale_info])]
+    return [
+        MultiscaleInfo(
+            name="",
+            axes_names=tuple("" for _ in range(ndim)),
+            unit="",
+            unit_factor=1,  # safer than zero or nan
+            scales=[scale_info],
+        )
+    ]
 
 
 def create_scale_infos_from_ome_zarr_group(
@@ -113,7 +130,8 @@ def create_scale_infos_from_ome_zarr_group(
 ) -> list[MultiscaleInfo]:
     zarr_info = zarr_group.metadata
     ome_info = zarr_info["attributes"]["ome"]
-    ome_version = ome_info["version"]  # this code kind of assumes 0.5
+    ome_version = ome_info["version"]
+    assert ome_version >= 0.5  # this code assumes 0.5
 
     # “multiscales” contains a list of dictionaries where each entry describes a multiscale image.
     assert "multiscales" in ome_info
@@ -122,8 +140,8 @@ def create_scale_infos_from_ome_zarr_group(
 
     for multiscale_dict in ome_info["multiscales"]:
         name = multiscale_dict.get("name", "")  # SHOULD field
-        downscale_type = multiscale_dict.get("type", "")  # SHOULD field
-        downscale_metadata = multiscale_dict.get("metadata", {})  # SHOULD field
+        _downscale_type = multiscale_dict.get("type", "")  # SHOULD field
+        _downscale_metadata = multiscale_dict.get("metadata", {})  # SHOULD field
 
         # Process axes metadata
 
@@ -145,12 +163,18 @@ def create_scale_infos_from_ome_zarr_group(
         elif axes_types[1] == "channel":
             channel_dim = 1
 
-        # TODO: store axes_names somewhere
-
-        # Get and check unit
-        unit = axes_info[-1].get("unit", "").lower()  # SHOULD field
+        # Get and check unit - # SHOULD field
+        units = [d.get("unit", "").lower() for d in axes_info[-space_dims:]]
+        units = [unit for unit in units if unit]
+        unit = "" if not units else units[-1]
         if unit not in SPACE_UNITS:
-            raise RuntimeError(f"Zarr data has unexpected space unit: {unit!r}")
+            raise RuntimeError(f"{MSG_PREFIX}: unexpected space unit: {unit!r}")
+        elif not unit:
+            logger.warning(f"{MSG_PREFIX}: spatial dimensions don't not have a unit.")
+        elif len(set(units)) > 1:
+            logger.warning(
+                f"{MSG_PREFIX}: spatial dimensions define different units, using the last ('{unit}')"
+            )
 
         # Process coordinateTransformations
 
@@ -198,31 +222,34 @@ def create_scale_infos_from_ome_zarr_group(
                     ]
 
             spatial_scale = tuple(full_scale[-space_dims:])
-            ref_scale = sum(spatial_scale) / len(spatial_scale)
+            mean_scale = sum(spatial_scale) / len(spatial_scale)
 
             si = ScaleInfo(
-                level=level,
                 array=zarr_array,
-                path=path,
+                level=level,
+                mean_scale=mean_scale,
                 spatial_offset=tuple(full_translation[-space_dims:]),
                 spatial_scale=tuple(full_scale[-space_dims:]),
                 spatial_shape=tuple(zarr_array.shape[-space_dims:]),
                 spatial_chunk_shape=tuple(zarr_array.chunk_shape[-space_dims:]),
-                ref_scale=ref_scale,
                 nchannels=zarr_array.shape[channel_dim]
                 if channel_dim is not None
                 else 0,
                 ntimes=zarr_array.shape[time_dim] if time_dim is not None else 0,
-                numel=0,
             )
-            si.numel = int(np.prod(si.spatial_shape)) * si.nchannels  # TODO: fix
             scale_infos.append(si)
 
         # Sort, by highest res first
         # The “path's MUST be ordered from largest (i.e. highest resolution) to smallest, but we sort anyway
-        scale_infos.sort(key=lambda si: si.ref_scale)
+        scale_infos.sort(key=lambda si: si.mean_scale)
         multiscale_images.append(
-            MultiscaleInfo(name, unit, SPACE_UNITS[unit], scale_infos)
+            MultiscaleInfo(
+                name=name,
+                axes_names=tuple(axes_names),
+                unit=unit,
+                unit_factor=SPACE_UNITS[unit] if unit else 1,
+                scales=scale_infos,
+            )
         )
 
     return multiscale_images
