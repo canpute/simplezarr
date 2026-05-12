@@ -1,7 +1,13 @@
 from pathlib import Path
 import shutil
 
-from simplezarr.stores import BaseStore, ReadableStore, WritableStore, ListableStore
+from simplezarr.stores import (
+    BaseStore,
+    ReadableStore,
+    WritableStore,
+    ListableStore,
+    SlowStore,
+)
 from simplezarr.stores import check_key, check_prefix
 from simplezarr.stores import MemoryStore, LocalStore, WrapperStore
 
@@ -99,6 +105,11 @@ class WrapperStoreTestable(WrapperStore):
         super().__init__(MemoryStore(STORE))
 
 
+class SlowStoreTestable(SlowStore):
+    def __init__(self):
+        super().__init__(MemoryStore(STORE), 1.0, 10_000)
+
+
 # %%%%% Test all stores
 
 
@@ -109,6 +120,7 @@ store_classes = [
     MemoryStoreTestable,
     LocalStoreTestable,
     WrapperStoreTestable,
+    SlowStoreTestable,
 ]
 
 

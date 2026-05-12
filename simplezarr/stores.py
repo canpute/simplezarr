@@ -37,6 +37,7 @@ __all__ = [
     "MemoryStore",
     "LocalStore",
     "WrapperStore",
+    "SlowStore",
 ]
 
 List = list  # for typing
@@ -476,8 +477,8 @@ class SlowStore(WrapperStore):
             self._sleep(len(value))
 
         elif method == "set_partial_values":
-            keys = args
-            self._sleep(sum(len(value) for _, _, value in keys))
+            (key_start_values,) = args
+            self._sleep(sum(len(value) for _, _, value in key_start_values))
 
         # base delay
         else:
