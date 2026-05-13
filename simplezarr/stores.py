@@ -448,7 +448,7 @@ class SlowStore(WrapperStore):
         self,
         store: ReadableStore | WritableStore | ListableStore,
         base_delay: float = 1.0,
-        bits_per_second: float = None,
+        bits_per_second: float = 0.0,
     ):
         super().__init__(store)
         self._base_delay = base_delay
@@ -457,7 +457,7 @@ class SlowStore(WrapperStore):
     def _sleep(self, nbytes: int):
         delay = self._base_delay
 
-        if self._bits_per_second and self._bits_per_second > 0:
+        if self._bits_per_second > 0:
             delay += (nbytes * 8) / self._bits_per_second
 
         if delay > 0:
