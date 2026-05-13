@@ -1,16 +1,13 @@
 """
-Implementation of a chunk pool, allowing asynchronous processing of chunks.
-
 The ChunkPool object keeps track of the individual chunks. Freeing the chunks when no longer used.
-Multiple ChunkManager objects can use the same pool. Via this objects, user-code can request the loading
 of chunks, and free chunks when no longer needed.
 """
 
 from __future__ import annotations
 
+import inspect
 import asyncio
 from itertools import count as Counter  # noqa: N812
-from concurrent.futures import wait as concurrent_wait
 from typing import Generator
 
 import numpy as np
@@ -20,7 +17,6 @@ from simplezarr.utils.multiscale import (
     MultiscaleInfo,
     ScaleInfo,
 )
-from simplezarr.utils.logs import log_exception
 
 ref_counter = Counter()
 
@@ -28,7 +24,7 @@ ref_counter = Counter()
 def create_chunk_pools_from_zarr_node(
     zarr_node: simplezarr.ZarrNode,
 ) -> list[ChunkPool]:
-    """Create ChunkPool objects from a given zarr node. Each multiscale image results in one pool."""
+    """Create a ``ChuckPool`` for every (multiscale) image in the given Zarr node."""
     multiscale_infos = create_scale_infos_from_zarr_node(zarr_node)
     pools = []
     for multiscale_info in multiscale_infos:
@@ -38,13 +34,10 @@ def create_chunk_pools_from_zarr_node(
 
 
 class ChunkPool:
-    """A pool of chunks, aware of multiscale (ome-zarr), and multi-channel."""
+    """An object to get access to individual chunks, with support for caching and parallel loading."""
 
     def __init__(self, multiscale_info: MultiscaleInfo):
         self._multiscale_info = multiscale_info
-
-        # TODO: allow chunks to exist for longer, based on a max memory pool
-
         self._chunks = []  # level -> chunk_index -> ChunkSpot
         for _ in range(len(self._multiscale_info.scales)):
             self._chunks.append({})
@@ -67,25 +60,62 @@ class ChunkPool:
     ) -> ChunkSpot:
         """Get a ChunkSpot object.
 
-        The returned object represents the requested chunk, but the corresponding data is not loaded yet.
+        The returned object represents the requested chunk. The ``ref`` should
+        be a unique string indicating the 'user'. When a chunk is requested, the
+        pool caches the chunk until it is dropped (using the same ``ref``). That
+        way, other code that uses the same pool, requesting chunks that are
+        already loaded, can share the chunks.
+
+        The corresponding data is being loaded but may not be ready yet. One can
+        either sync-wait for it, async-wait for multiple chunks in parallel, or
+        schedule an async task to happen when the chunk has loaded.
+
+        Individual chunks can be loaded synchronously using::
+
+            chunk_spot.wait()
+            data = chunk_spot.data
+
+        After getting multiple chunks, it's easy to load them in parallel::
+
+            loop.wait_for_chunks_to_load()
+
+        This is equivalent to:
+
+            chunk_spots = [...] for chunk_spot in chunk_spots:
+            for chunk_spot in chunk_spots:
+                chunk_spot.wait()
+
+        In applications using asyncio, you can asynchronously process chunks as
+        soon as they are loaded::
+
+            def chunk_handler(chunk_spot):
+               ...  # this func can also be async
+
+            chunk_spot.add_async_handler(chunk_handler)
+
         """
+        if not (isinstance(ref, str) and len(ref) > 0):
+            raise TypeError("get_chunk() ref must be a nonempty string.")
 
         chunk_spot = self._chunks[level].get(chunk_index, None)
         if chunk_spot is None:
             chunk_info = self._multiscale_info.scales[level]
             chunk_spot = ChunkSpot(chunk_info, chunk_index)
             self._chunks[level][chunk_index] = chunk_spot
-        chunk_spot._add_ref(ref)
+        chunk_spot._refs.add(ref)
+
         return chunk_spot
 
     def drop_chunk(self, level: int, chunk_index: tuple[int, ...], ref: str) -> None:
-        """Release a chunk.
+        """Release a chunk by their index.
 
-        Tell the pool that you're done using the chunk spot at the given location.
+        It is important to use the same unique ``ref`` as when ``get_chunk()`` was called. That way
+        the pool can properly detect when no-one is using a chunk anymore, so it can be marked for deletion.
         """
         chunk_spot = self._chunks[level].get(chunk_index, None)
         if chunk_spot is not None:
-            has_refs = chunk_spot._drop_ref(ref)
+            chunk_spot._refs.discard(ref)
+            has_refs = len(chunk_spot._refs) > 0
             if not has_refs:
                 chunk_spot.destroy()
                 self._chunks[level].pop(chunk_index, None)
@@ -96,127 +126,10 @@ class ChunkPool:
             for chunk in chunks.values():
                 yield chunk
 
-
-class ChunkManager:
-    """Object that manages chunks for a certain purpose, using a shared ChunkPool.
-
-    Chunks can be loaded in parallel:
-
-        with manager:
-            chunk1 = manager.get_chunk(level, index1)
-            chunk2 = manager.get_chunk(level, index2)
-
-        # After the with-statement, the code will wait for the data of all chunks to be loaded
-
-    """
-
-    def __init__(self, pool):
-        # Each ChunkManager has a unique ref, so that the pool can keep track how many 'users' each chunk has, and drop the chunk when there are none left
-        self._ref = f"{self.__class__.__name__} {next(ref_counter)}"
-        self._pool = pool
-        self._unloaded_chunk_spots = None
-
-        # We also keep track of what chunks we have
-        self._chunks = []  # level -> chunk_index -> ChunkSpot
-        for _ in range(len(self._pool.multiscale_info.scales)):
-            self._chunks.append({})
-
-    def __enter__(self):
-        if self._unloaded_chunk_spots is not None:
-            raise RuntimeError("Cannot use a ChunkManager in a with-statement twice.")
-        self._unloaded_chunk_spots = []
-        return self
-
-    def __exit__(self, type, value, traceback):
-        unloaded_chunk_spots = self._unloaded_chunk_spots
-        self._unloaded_chunk_spots = None
-        if unloaded_chunk_spots:
-            concurrent_wait([chunk_spot._future for chunk_spot in unloaded_chunk_spots])
-            for chunk_spot in unloaded_chunk_spots:
-                self._call_on_chunk_load(chunk_spot)
-        return None
-        # TODO: should the manager drop all chunks here? If so, add manager.load() to sync-load all requested chunks so far.
-
-    @property
-    def ref(self) -> str:
-        """The unique reference of this chunk manager.
-
-        References are used by the pool to keep track of chunk usage.
-        """
-        return self._ref
-
-    @property
-    def pool(self) -> ChunkPool:
-        """The ChunkPool used by this chunk manager.
-
-        Multiple chunk managers can use the same pool.
-        """
-        return self._pool
-
-    def request_chunk_sync(self, level, chunk_index):
-        """Request a chunk in a synchronous manner.
-
-        Must be called by using the manager in a ``with`` statement. All
-        requested chunks within that statement are then loaded in parallel.
-        """
-        chunk_spot = self._chunks[level].get(chunk_index)
-        if chunk_spot is not None:
-            return chunk_spot
-
-        assert self._unloaded_chunk_spots is not None
-        chunk_spot = self._pool.get_chunk(level, chunk_index, self._ref)
-        self._chunks[level][chunk_index] = chunk_spot
-
-        self._unloaded_chunk_spots.append(chunk_spot)
-        return chunk_spot
-
-    def request_chunk_async(self, level, chunk_index) -> asyncio.Task:
-        """Request a chunk asynchronously. Assumes a running asyncio loop.
-
-        Loads the chunk (if needed) and calls ``_on_chunk_load()``.
-        Can be used as fire-and-forget, but also returns a future than can be awaited.
-        """
-        loop = asyncio.get_running_loop()
-
-        chunk_spot = self._chunks[level].get(chunk_index)
-        if chunk_spot is not None:
-            return loop.create_task(asyncio.sleep(0))
-
-        chunk_spot = self._pool.get_chunk(level, chunk_index, self._ref)
-        self._chunks[level][chunk_index] = chunk_spot
-
-        async def request_chunk_async_internal(chunk_spot):
-            await asyncio.wrap_future(chunk_spot._future)
-            self._call_on_chunk_load(chunk_spot)
-
-        return loop.create_task(request_chunk_async_internal(chunk_spot))
-
-    def drop(self, chunk_spot: ChunkSpot):
-        """Drop the given chunk."""
-        self.drop_chunk(chunk_spot.level, chunk_spot.index)
-
-    def drop_chunk(self, level, chunk_index):
-        """Drop a chunk so it can be unloaded."""
-        self._pool.drop_chunk(level, chunk_index, self._ref)
-        chunk_spot = self._chunks[level].pop(chunk_index, None)
-        if chunk_spot is not None:
-            self._call_on_chunk_drop(chunk_spot)
-
-    def _call_on_chunk_load(self, chunk_spot):
-        with log_exception("on_chunk_load"):
-            self.on_chunk_load(chunk_spot)
-
-    def on_chunk_load(self, chunk_spot):
-        """Overload this in a subclass to automatically perform an action when a chunk is loaded."""
-        pass
-
-    def _call_on_chunk_drop(self, chunk_spot):
-        with log_exception("on_chunk_drop"):
-            self.on_chunk_drop(chunk_spot)
-
-    def on_chunk_drop(self, chunk_spot):
-        """Overload this in a subclass to automatically perform an action when a chunk is dropped."""
-        pass
+    def wait_for_chunks_to_load(self):
+        """Wait for all requested chunks to load their data."""
+        for chunk_spot in self.iter_chunks:
+            chunk_spot.wait()
 
 
 class ChunkSpot:
@@ -226,13 +139,9 @@ class ChunkSpot:
         self._scale_info = scale_info
         self._index = index
 
-        self._refs = set()
+        self._refs = set()  # managed by the ChunkPool
         self._data = None
         self._future = scale_info.array.get_chunk_future(index)
-
-    def destroy(self):
-        self._future = None
-        self._data = None
 
     @property
     def scale_info(self) -> ScaleInfo:
@@ -241,18 +150,24 @@ class ChunkSpot:
 
     @property
     def level(self) -> int:
+        """The integer level that this chunk belongs to."""
         return self._scale_info.level
 
     @property
     def index(self) -> tuple[int, ...]:
+        """The index of this chunk."""
         return self._index
+
+    @property
+    def future(self):
+        """The ``concurrent.futures.Future`` for loading the data."""
+        return self._future
 
     @property
     def data(self) -> np.ndarray:
         """The data (numpy array) for this chunk.
 
         When this property is accessed before the data is loaded, a RuntimeError is raised.
-
         """
         if self._data is None:
             if not self._future.done():
@@ -267,13 +182,30 @@ class ChunkSpot:
         """A set of references that currently use this chunk."""
         return set(self._refs)
 
-    def _add_ref(self, ref: str):
-        # Called by the ChunkPool
-        assert isinstance(ref, str)
-        self._refs.add(ref)
+    def wait(self):
+        """Synchronously wait for the chunk's data to load."""
+        self._future.result()
 
-    def _drop_ref(self, ref: str) -> bool:
-        # Called by the ChunkPool
-        assert isinstance(ref, str)
-        self._refs.discard(ref)
-        return len(self._refs) > 0  # does it still have refs?
+    def add_async_handler(self, func_to_process_chunk) -> asyncio.Task:
+        """Add a a handler that gets called when the chunk is done loading.
+
+        This creates a new task to the currently running asyncio loop, which waits for the
+        chunks data to be loaded, and then calls ``func_to_process_chunk``. That function
+        can be either a plain function or a coroutine.
+
+        Returns the new asyncio task.
+        """
+
+        async def add_async_handler_wrapper(chunk_spot):
+            await asyncio.wrap_future(self._future)
+            x = func_to_process_chunk(chunk_spot)
+            if inspect.iscoroutine(x):
+                await x
+
+        loop = asyncio.get_running_loop()
+        return loop.create_task(add_async_handler_wrapper(self))
+
+    def destroy(self):
+        """Destroy this chunkspot, clearing all data. This is automatically called by the pool when no-one uses the chunk anymore."""
+        self._future = None
+        self._data = None
