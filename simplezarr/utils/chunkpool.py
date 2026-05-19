@@ -5,13 +5,13 @@ of chunks, and free chunks when no longer needed.
 
 from __future__ import annotations
 
-import inspect
 import asyncio
 from itertools import count as Counter  # noqa: N812
 from typing import Generator
 
 import numpy as np
 import simplezarr
+from simplezarr.utils.logs import log_exception
 from simplezarr.utils.multiscale import (
     create_scale_infos_from_zarr_node,
     MultiscaleInfo,
@@ -36,9 +36,10 @@ def create_chunk_pools_from_zarr_node(
 class ChunkPool:
     """An object to get access to individual chunks, with support for caching and parallel loading."""
 
-    def __init__(self, multiscale_info: MultiscaleInfo):
+    def __init__(self, multiscale_info: MultiscaleInfo, call_soon_threadsafe=None):
         self._multiscale_info = multiscale_info
-        self._chunks = []  # level -> chunk_index -> ChunkSpot
+        self._call_soon_threadsafe = call_soon_threadsafe
+        self._chunks = []  # level -> chunk_index -> ChunkLocation
         for _ in range(len(self._multiscale_info.scales)):
             self._chunks.append({})
 
@@ -52,13 +53,23 @@ class ChunkPool:
 
     def destroy(self):
         """Clear all chunks."""
-        # TODO: implement!
-        raise NotImplementedError()
+        for chunk_dict in self._chunks:
+            chunks = list(chunk_dict.values())
+            chunk_dict.clear()
+            for chunk in chunks:
+                chunk._destroy()
 
     def get_chunk(
-        self, level: int, chunk_index: tuple[int, ...], ref: str
-    ) -> ChunkSpot:
-        """Get a ChunkSpot object.
+        self,
+        level: int,
+        chunk_index: tuple[int, ...],
+        ref: str,
+        *,
+        load_handler=None,
+        drop_handler=None,
+        destroy_handler=None,
+    ) -> ChunkLocation:
+        """Get a ChunkLocation object.
 
         The returned object represents the requested chunk. The ``ref`` should
         be a unique string indicating the 'user'. When a chunk is requested, the
@@ -88,10 +99,10 @@ class ChunkPool:
         In applications using asyncio, you can asynchronously process chunks as
         soon as they are loaded::
 
-            def chunk_handler(chunk_spot):
+            def load_handler(chunk_spot):
                ...  # this func can also be async
 
-            chunk_spot.add_async_handler(chunk_handler)
+            pool.get_chunk(..., load_handler=load_handler)
 
         """
         if not (isinstance(ref, str) and len(ref) > 0):
@@ -100,9 +111,21 @@ class ChunkPool:
         chunk_spot = self._chunks[level].get(chunk_index, None)
         if chunk_spot is None:
             chunk_info = self._multiscale_info.scales[level]
-            chunk_spot = ChunkSpot(chunk_info, chunk_index)
+            chunk_spot = ChunkLocation(chunk_info, chunk_index)
             self._chunks[level][chunk_index] = chunk_spot
-        chunk_spot._refs.add(ref)
+
+        call_soon_threadsafe = self._call_soon_threadsafe
+        if call_soon_threadsafe is None and load_handler is not None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                call_soon_threadsafe = loop.call_soon_threadsafe
+
+        chunk_spot._register(
+            ref, call_soon_threadsafe, load_handler, drop_handler, destroy_handler
+        )
 
         return chunk_spot
 
@@ -114,13 +137,13 @@ class ChunkPool:
         """
         chunk_spot = self._chunks[level].get(chunk_index, None)
         if chunk_spot is not None:
-            chunk_spot._refs.discard(ref)
-            has_refs = len(chunk_spot._refs) > 0
+            chunk_spot._drop(ref)
+            has_refs = len(chunk_spot.refs) > 0
             if not has_refs:
-                chunk_spot.destroy()
+                chunk_spot._destroy()
                 self._chunks[level].pop(chunk_index, None)
 
-    def iter_chunks(self) -> Generator[ChunkSpot]:
+    def iter_chunks(self) -> Generator[ChunkLocation]:
         """Iterate over all currently loaded chunks."""
         for chunks in self._chunks:
             for chunk in chunks.values():
@@ -128,20 +151,24 @@ class ChunkPool:
 
     def wait_for_chunks_to_load(self):
         """Wait for all requested chunks to load their data."""
-        for chunk_spot in self.iter_chunks:
+        for chunk_spot in self.iter_chunks():
             chunk_spot.wait()
 
 
-class ChunkSpot:
+class ChunkLocation:
     """An Object that represents a chunk location."""
 
     def __init__(self, scale_info: ScaleInfo, index: tuple[int, ...]):
         self._scale_info = scale_info
         self._index = index
 
-        self._refs = set()  # managed by the ChunkPool
+        self._refs = set()
         self._data = None
         self._future = scale_info.array.get_chunk_future(index)
+        print("future", self._future.running(), self._future.done())
+        self._load_handlers = {}
+        self._drop_handlers = {}
+        self._destroy_handlers = {}
 
     @property
     def scale_info(self) -> ScaleInfo:
@@ -169,6 +196,7 @@ class ChunkSpot:
 
         When this property is accessed before the data is loaded, a RuntimeError is raised.
         """
+        print("future", self._future.running(), self._future.done())
         if self._data is None:
             if not self._future.done():
                 raise RuntimeError(
@@ -185,27 +213,64 @@ class ChunkSpot:
     def wait(self):
         """Synchronously wait for the chunk's data to load."""
         self._future.result()
+        self._process_load_handlers()
 
-    def add_async_handler(self, func_to_process_chunk) -> asyncio.Task:
-        """Add a a handler that gets called when the chunk is done loading.
+    def _register(
+        self,
+        ref: str,
+        call_soon_threadsafe=None,
+        on_load=None,
+        on_drop=None,
+        on_destroy=None,
+    ):
+        self._refs.add(ref)
 
-        This creates a new task to the currently running asyncio loop, which waits for the
-        chunks data to be loaded, and then calls ``func_to_process_chunk``. That function
-        can be either a plain function or a coroutine.
+        if call_soon_threadsafe is not None:
+            self._future.add_done_callback(
+                lambda f: call_soon_threadsafe(self._process_load_handlers)
+            )
 
-        Returns the new asyncio task.
-        """
+        if on_load is not None:
+            self._load_handlers.setdefault(ref, []).append(on_load)
+            if self._future.done():
+                self._process_load_handlers()
 
-        async def add_async_handler_wrapper(chunk_spot):
-            await asyncio.wrap_future(self._future)
-            x = func_to_process_chunk(chunk_spot)
-            if inspect.iscoroutine(x):
-                await x
+        if on_drop is not None:
+            self._drop_handlers.setdefault(ref, []).append(on_drop)
 
-        loop = asyncio.get_running_loop()
-        return loop.create_task(add_async_handler_wrapper(self))
+        if on_destroy is not None:
+            self._destroy_handlers.setdefault(ref, []).append(on_destroy)
 
-    def destroy(self):
-        """Destroy this chunkspot, clearing all data. This is automatically called by the pool when no-one uses the chunk anymore."""
+    def _invoke_handlers(self, what, *handlers):
+        for func in handlers:
+            with log_exception(what):
+                func(self)
+
+    def _process_load_handlers(self):
+        for ref in list(self._load_handlers.keys()):
+            handlers = self._load_handlers.pop(ref, [])
+            self._invoke_handlers(
+                f"ChunkLocation load callback for ref {ref!r}", *handlers
+            )
+
+    def _drop(self, ref: str):
+        self._refs.discard(ref)
+        self._load_handlers.pop(ref, None)
+        handlers = self._drop_handlers.pop(ref, [])
+        self._invoke_handlers(f"ChunkLocation drop callback for ref {ref!r}", *handlers)
+
+    def _destroy(self):
+        self._refs.clear()
+        self._load_handlers = {}
+        for ref in list(self._drop_handlers.keys()):
+            handlers = self._drop_handlers.pop(ref, [])
+            self._invoke_handlers(
+                f"ChunkLocation drop callback for ref {ref!r}", *handlers
+            )
+        for ref in list(self._destroy_handlers.keys()):
+            handlers = self._destroy_handlers.pop(ref, [])
+            self._invoke_handlers(
+                f"ChunkLocation destroy callback for ref {ref!r}", *handlers
+            )
         self._future = None
         self._data = None

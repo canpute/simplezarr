@@ -279,7 +279,9 @@ class ZarrArray(ZarrNode):
             raise ValueError("ZarrArray.get_chunk() needs integer indices.")
 
         # Load data. This could take a while if it's a remote/slow store
-        path = self._path + "/c/" + self._chunk_separator.join(f"{x}" for x in index)
+        path = "c/" + self._chunk_separator.join(f"{x}" for x in index)
+        if self._path:
+            path = self._path + "/" + path
         try:
             encoded_bytes = self._store.get(path)
         except IOError:
