@@ -46,7 +46,7 @@ def test_resolve_codecs_from_dicts():
         {"name": "bytes", "configuration": {"endian": "little"}},
     ]
 
-    codecs, types = resolve_codecs_from_dicts(d, array_type)
+    codecs, _types = resolve_codecs_from_dicts(d, array_type)
     assert len(codecs) == 1
     assert isinstance(codecs[0], codecsmod.BytesCodec)
 
@@ -56,7 +56,7 @@ def test_resolve_codecs_from_dicts():
         {"name": "gzip", "configuration": {"level": 6}},
     ]
 
-    codecs, types = resolve_codecs_from_dicts(d, array_type)
+    codecs, _types = resolve_codecs_from_dicts(d, array_type)
     assert len(codecs) == 2
     assert isinstance(codecs[0], codecsmod.BytesCodec)
     assert isinstance(codecs[1], codecsmod.GzipCodec)
@@ -69,7 +69,7 @@ def test_resolve_codecs_from_dicts():
         {"name": "crc32c", "configuration": {}},
     ]
 
-    codecs, types = resolve_codecs_from_dicts(d, array_type)
+    codecs, _types = resolve_codecs_from_dicts(d, array_type)
     assert len(codecs) == 4
     assert isinstance(codecs[0], codecsmod.TransposeCodec)
     assert isinstance(codecs[1], codecsmod.BytesCodec)

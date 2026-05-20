@@ -291,7 +291,7 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
         self._path = Path(path)
 
     def __repr__(self):
-        return f"<LocalStore '{self._path}' at {hex(id(self))}>"
+        return f"   LocalStore '{self._path}' at {hex(id(self))}>"
 
     def get(self, key: str) -> bytes:
         check_key(self, "get", key)
@@ -473,7 +473,7 @@ class SlowStore(WrapperStore):
 
         # write delay
         elif method == "set":
-            key, value = args
+            _key, value = args
             self._sleep(len(value))
 
         elif method == "set_partial_values":
