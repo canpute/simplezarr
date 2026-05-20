@@ -64,15 +64,15 @@ store_data2 = {
                                 {
                                     "path": "scale2",
                                     "coordinateTransformations": [
-                                        {"type": "scale", "scale": [2, 2, 2]},
-                                        {"type": "translation", "translation": [0, 0, 0]}
+                                        {"type": "scale", "scale": [1, 2, 2]},
+                                        {"type": "translation", "translation": [0, 0.4, 0.4]}
                                     ]
                                 },
                                 {
                                     "path": "scale3",
                                     "coordinateTransformations": [
-                                        {"type": "scale", "scale": [4, 4, 4]},
-                                        {"type": "translation", "translation": [0, 0, 0]}
+                                        {"type": "scale", "scale": [1, 4, 4]},
+                                        {"type": "translation", "translation": [0, 0.8, 0.8]}
                                     ]
                                 }
                             ]
@@ -265,6 +265,63 @@ def test_create_scale_infos_from_zarr_node2():
     assert si.spatial_shape == (25, 25)
     assert si.nchannels == 2
     assert si.ntimes == 0
+
+
+def test_create_scale_infos_from_zarr_node_transforms():
+
+    temp_store_data = store_data2.copy()
+
+    store = MemoryStore(temp_store_data)
+    infos = create_scale_infos_from_zarr_node(open_zarr(store))
+    info = infos[0]
+
+    # scale 0
+    si = info.scales[0]
+    assert si.spatial_offset == (0, 0)
+    assert si.spatial_scale == (1, 1)
+
+    # scale 1
+    si = info.scales[1]
+    assert si.spatial_offset == (0.4, 0.4)
+    assert si.spatial_scale == (2, 2)
+
+    # scale 3
+    si = info.scales[2]
+    assert si.spatial_offset == (0.8, 0.8)
+    assert si.spatial_scale == (4, 4)
+
+    # Add global transforms
+
+    json = temp_store_data["zarr.json"].decode()
+    json = json.replace(
+        '"datasets"',
+        '''"coordinateTransformations": [
+                                {"type": "scale", "scale": [1, 10, 10]},
+                                {"type": "translation", "translation": [0, 1, -2]}
+                            ],
+                            "datasets"''',
+    )
+
+    temp_store_data["zarr.json"] = json.encode()
+
+    store = MemoryStore(temp_store_data)
+    infos = create_scale_infos_from_zarr_node(open_zarr(store))
+    info = infos[0]
+
+    # scale 0
+    si = info.scales[0]
+    assert si.spatial_offset == (1, -2)
+    assert si.spatial_scale == (10, 10)
+
+    # scale 1
+    si = info.scales[1]
+    assert si.spatial_offset == (10 * 0.4 + 1, 10 * 0.4 - 2)
+    assert si.spatial_scale == (20, 20)
+
+    # scale 3
+    si = info.scales[2]
+    assert si.spatial_offset == (10 * 0.8 + 1, 10 * 0.8 - 2)
+    assert si.spatial_scale == (40, 40)
 
 
 if __name__ == "__main__":

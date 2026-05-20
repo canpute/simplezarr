@@ -63,7 +63,7 @@ def create_scale_infos_from_zarr_node(
         return create_scale_infos_from_ome_zarr_group(zarr_node)
     elif isinstance(zarr_node, simplezarr.ZarrArray):
         return create_scale_infos_from_zarr_array(zarr_node)
-    else:
+    else:  # no-cover
         raise TypeError(f"Cannot get scale infos from {zarr_node!r}")
 
 
@@ -94,8 +94,8 @@ def create_scale_infos_from_zarr_array(
         space_dims = 3
         channel_dim = 1
         time_dim = 0
-    else:
-        raise RuntimeError("Unsupported dimensions")
+    else:  # no-cover
+        raise TypeError("Unsupported dimensions")
 
     full_scale = [1] * ndim
     full_translation = [0] * ndim
@@ -150,8 +150,8 @@ def create_scale_infos_from_ome_zarr_group(
         # Check axes names
         axes_names = tuple(x["name"] for x in axes_info)  # MUST field
         axes_types = tuple(x["type"] for x in axes_info)  # SHOULD field
-        if not all(an in "tczyx" for an in axes_names):
-            raise RuntimeError(f"Zarr data has unexpected axes: {axes_names}")
+        if not all(an in "tczyx" for an in axes_names):  # no-cover
+            raise TypeError(f"Zarr data has unexpected axes: {axes_names}")
         space_dims = axes_types.count("space")
         assert all(at == "space" for at in axes_types[-space_dims:])
         assert all(at != "space" for at in axes_types[0:-space_dims])
@@ -167,11 +167,11 @@ def create_scale_infos_from_ome_zarr_group(
         units = [d.get("unit", "").lower() for d in axes_info[-space_dims:]]
         units = [unit for unit in units if unit]
         unit = "" if not units else units[-1]
-        if unit not in SPACE_UNITS:
-            raise RuntimeError(f"{MSG_PREFIX}: unexpected space unit: {unit!r}")
-        elif not unit:
+        if unit not in SPACE_UNITS:  # no-cover
+            raise TypeError(f"{MSG_PREFIX}: unexpected space unit: {unit!r}")
+        elif not unit:  # no-cover
             logger.warning(f"{MSG_PREFIX}: spatial dimensions don't not have a unit.")
-        elif len(set(units)) > 1:
+        elif len(set(units)) > 1:  # no-cover
             logger.warning(
                 f"{MSG_PREFIX}: spatial dimensions define different units, using the last ('{unit}')"
             )
