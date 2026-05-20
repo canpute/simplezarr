@@ -13,12 +13,12 @@ dependencies = ['numpy']
 [project.optional-dependencies]
 lint = ["ruff", "pre-commit"]
 docs = ["sphinx>7.2", "sphinx_rtd_theme"]
-tests = ["pytest"]
+tests = ["pytest", "pytest-cov"]
 dev = ["simplezarr[lint,tests,docs]"]
 
 [project.urls]
-Homepage = "https://github.com/almarklein/simplezarr"
-Repository = "https://github.com/almarklein/simplezarr"
+Homepage = "https://github.com/canpute/simplezarr"
+Repository = "https://github.com/canpute/simplezarr"
 # Documentation = "https://simplezarr.readthedocs.io"
 
 # ===== Building
