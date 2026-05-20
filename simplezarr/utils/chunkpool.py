@@ -21,27 +21,41 @@ from simplezarr.utils.multiscale import (
 __all__ = ["ChunkPool", "ChunkManager", "ChunkLocation"]
 
 
-def create_chunk_pools_from_zarr_node(
-    zarr_node: simplezarr.ZarrNode,
-) -> list[ChunkPool]:
-    """Create a ``ChuckPool`` for every (multiscale) image in the given Zarr node."""
-    multiscale_infos = create_scale_infos_from_zarr_node(zarr_node)
-    pools = []
-    for multiscale_info in multiscale_infos:
-        pool = ChunkPool(multiscale_info)
-        pools.append(pool)
-    return pools
-
-
 class ChunkPool:
-    """An object to get access to individual chunks, with support for caching and parallel loading."""
+    """An object to get access to individual chunks, with support for caching and parallel loading.
 
-    def __init__(self, multiscale_info: MultiscaleInfo):
+    Parameters
+    ----------
+    multiscale_info : MultiscaleInfo
+        The multiscale_info object for which to create a pool.
+
+    Cache behavior
+    --------------
+    Chunks that are dropped and have zero references (i.e. users), are normally
+    destroyed. If ``cache_size > 0``, then that number of chunks are kept in memory, so
+    that getting the chunk later is super-fast. Cached chunks are dropped oldest first (i.e. FIFO).
+    The use of caching delays the ChunkLocation objects from being destroyed.
+    """
+
+    def __init__(self, multiscale_info: MultiscaleInfo, cache_size: int = 0):
         self._multiscale_info = multiscale_info
+        self._cache_size = max(0, int(cache_size or 0))
+        self._memory_usage = 0
         self._call_soon_threadsafe = None
-        self._chunks = []  # level -> chunk_index -> ChunkLocation
-        for _ in range(len(self._multiscale_info.scales)):
-            self._chunks.append({})
+        self._loaded_chunks = {}  # chunk_id -> ChunkLocation
+        self._cached_chunks = {}
+
+    @classmethod
+    def from_zarr_node(
+        cls, zarr_node: simplezarr.ZarrNode, cache_size: int = 0
+    ) -> list[ChunkPool]:
+        """Create a ``ChuckPool`` for every (multiscale) image in the given Zarr node."""
+        multiscale_infos = create_scale_infos_from_zarr_node(zarr_node)
+        pools = []
+        for multiscale_info in multiscale_infos:
+            pool = cls(multiscale_info, cache_size)
+            pools.append(pool)
+        return pools
 
     def __del__(self):
         return self.destroy()
@@ -50,6 +64,14 @@ class ChunkPool:
     def multiscale_info(self) -> MultiscaleInfo:
         """The ``MultiscaleInfo`` object that represents the information on the multiscale image."""
         return self._multiscale_info
+
+    @property
+    def memory_usage(self) -> int:
+        """The current memory usage in bytes.
+
+        The number is the sum of the (uncompressed) sizes of the arrays representing the chunks.
+        """
+        return self._memory_usage
 
     def enable_async_load_handlers(
         self, call_soon_threadsafe: Callable | Literal["asyncio", "none"]
@@ -77,23 +99,28 @@ class ChunkPool:
             self._call_soon_threadsafe = asyncio.get_running_loop().call_soon_threadsafe
         elif callable(call_soon_threadsafe):
             self._call_soon_threadsafe = call_soon_threadsafe
-        else:
+        else:  # no-cover
             raise TypeError(
                 "CheckPool.enable_async_load_handlers(): unexpected call_soon_threadsafe value: {call_soon_threadsafe!r}"
             )
 
     def destroy(self):
         """Drop and destroy all chunks."""
-        for chunk_dict in self._chunks:
-            chunks = list(chunk_dict.values())
-            chunk_dict.clear()
-            for chunk in chunks:
-                chunk._destroy()
+        chunks = list(self._loaded_chunks.values())
+        self._loaded_chunks.clear()
+        for chunk_location in chunks:
+            chunk_location._destroy()
+            self._memory_usage -= chunk_location.nbytes
+        chunks = list(self._cached_chunks.values())
+        self._cached_chunks.clear()
+        for chunk_location in chunks:
+            chunk_location._destroy()
+            self._memory_usage -= chunk_location.nbytes
 
     def get_chunk(
         self,
         level: int,
-        chunk_index: tuple[int, ...],
+        index: tuple[int, ...],
         ref: str = "pool",
         *,
         load_handler=None,
@@ -125,8 +152,8 @@ class ChunkPool:
 
         Individual chunks can be loaded synchronously using::
 
-            chunk_spot.wait()
-            data = chunk_spot.data
+            chunk_location.wait()
+            data = chunk_location.data
 
         After getting multiple chunks, it's easy to load them in parallel::
 
@@ -134,28 +161,33 @@ class ChunkPool:
 
         This is equivalent to:
 
-            chunk_spots = [...]
-            for chunk_spot in chunk_spots:
-                chunk_spot.wait()
+            chunk_locations = [...]
+            for chunk_location in chunk_locations:
+                chunk_location.wait()
         """
-        if not (isinstance(ref, str) and len(ref) > 0):
+        chunk_id = (level, *index)
+        if not (isinstance(ref, str) and len(ref) > 0):  # no-cover
             raise TypeError("get_chunk() ref must be a nonempty string.")
 
-        chunk_spot = self._chunks[level].get(chunk_index, None)
-        if chunk_spot is None:
-            chunk_info = self._multiscale_info.scales[level]
-            chunk_spot = ChunkLocation(chunk_info, chunk_index)
-            self._chunks[level][chunk_index] = chunk_spot
+        chunk_location = self._loaded_chunks.get(chunk_id, None)
 
-        chunk_spot._register(
+        if chunk_location is None:
+            chunk_location = self._cached_chunks.pop(chunk_id, None)
+
+        if chunk_location is None:
+            chunk_info = self._multiscale_info.scales[level]
+            chunk_location = ChunkLocation(chunk_info, index)
+            self._memory_usage += chunk_location.nbytes
+
+        self._loaded_chunks[chunk_id] = chunk_location
+
+        chunk_location._register(
             ref, self._call_soon_threadsafe, load_handler, drop_handler, destroy_handler
         )
 
-        return chunk_spot
+        return chunk_location
 
-    def drop_chunk(
-        self, level: int, chunk_index: tuple[int, ...], ref: str = "pool"
-    ) -> None:
+    def drop_chunk(self, level: int, index: tuple[int, ...], ref: str = "pool") -> None:
         """Release a chunk by their index.
 
         Parameters
@@ -171,24 +203,41 @@ class ChunkPool:
         This drops the chunk, invoking any drop handlers. When the chunk has no
         more refs, the chunk is destroyed. When the code has a single user,
         """
-        chunk_spot = self._chunks[level].get(chunk_index, None)
-        if chunk_spot is not None:
-            chunk_spot._drop(ref)
-            has_refs = len(chunk_spot.refs) > 0
+        chunk_id = (level, *index)
+        chunk_location = self._loaded_chunks.get(chunk_id, None)
+        to_destroy = []
+        if chunk_location is not None:
+            chunk_location._drop(ref)
+            has_refs = len(chunk_location.refs) > 0
             if not has_refs:
-                chunk_spot._destroy()
-                self._chunks[level].pop(chunk_index, None)
+                self._loaded_chunks.pop(chunk_id, None)
+                if not self._cache_size:
+                    to_destroy.append(chunk_location)
+                else:
+                    self._cached_chunks[chunk_id] = chunk_location
+                    cached_keys = list(self._cached_chunks.keys())
+                    i = -1
+                    while len(self._cached_chunks) > self._cache_size:
+                        i += 1
+                        old_chunk = self._cached_chunks.pop(cached_keys[i], None)
+                        if old_chunk is not None:
+                            to_destroy.append(chunk_location)
+
+        for chunk_location in to_destroy:
+            chunk_location._destroy()
+            self._memory_usage -= chunk_location.nbytes
 
     def iter_chunks(self) -> Generator[ChunkLocation]:
-        """Iterate over all currently loaded chunks."""
-        for chunks in self._chunks:
-            for chunk in chunks.values():
-                yield chunk
+        """Iterate over all currently loaded chunks, both loaded and cached."""
+        for chunk_location in self._loaded_chunks.values():
+            yield chunk_location
+        for chunk_location in self._cached_chunks.values():
+            yield chunk_location
 
     def wait_for_chunks_to_load(self):
         """Wait for all requested chunks to load their data."""
-        for chunk_spot in self.iter_chunks():
-            chunk_spot.wait()
+        for chunk_location in self._loaded_chunks.values():
+            chunk_location.wait()
 
 
 manager_counter = Count(1)
@@ -201,12 +250,12 @@ class ChunkManager:
     """
 
     def __init__(self, pool):
-        if not isinstance(pool, ChunkPool):
+        if not isinstance(pool, ChunkPool):  # no-cover
             raise TypeError(f"ChunkManager expects a ChunkPool instance, got {pool!r}")
         self._pool = pool
         self._ref = f"{self.__class__.__name__}-{next(manager_counter)}"
 
-    def get_chunk(self, level: int, chunk_index: tuple[int, ...]):
+    def get_chunk(self, level: int, index: tuple[int, ...]):
         """Get a ChunkLocation object.
 
         Parameters
@@ -228,14 +277,14 @@ class ChunkManager:
 
         return self._pool.get_chunk(
             level,
-            chunk_index,
+            index,
             self._ref,
             load_handler=self.on_load,
             drop_handler=self.on_drop,
             destroy_handler=self.on_destroy,
         )
 
-    def drop_chunk(self, level: int, chunk_index: tuple[int, ...]) -> None:
+    def drop_chunk(self, level: int, index: tuple[int, ...]) -> None:
         """Release a chunk by their index.
 
         Parameters
@@ -248,19 +297,19 @@ class ChunkManager:
         This drops the chunk, invoking any drop handlers. When the chunk has no
         more refs, the chunk is destroyed.
         """
-        return self._pool.drop_chunk(level, chunk_index, self._ref)
+        return self._pool.drop_chunk(level, index, self._ref)
 
     def on_load(self, chunk_location: ChunkLocation):
         """Method that gets called when a chunk is loaded. Override this in your subclass."""
-        pass
+        pass  # no-cover
 
     def on_drop(self, chunk_location: ChunkLocation):
         """Method that gets called when a chunk is dropped. Override this in your subclass."""
-        pass
+        pass  # no-cover
 
     def on_destroy(self, chunk_location: ChunkLocation):
         """Method that gets called when a chunk is destroyed. Override this in your subclass."""
-        pass
+        pass  # no-cover
 
 
 class ChunkLocation:
@@ -273,6 +322,7 @@ class ChunkLocation:
         self._refs = set()
         self._data = None
         self._future = scale_info.array.get_chunk_future(index)
+        self._nbytes = scale_info.array.chunk_nbytes
         self._load_handlers = {}
         self._drop_handlers = {}
         self._destroy_handlers = {}
@@ -293,6 +343,11 @@ class ChunkLocation:
         return self._index
 
     @property
+    def nbytes(self) -> int:
+        """The size of the chunk in (uncompressed) bytes"""
+        return self._nbytes
+
+    @property
     def future(self):
         """The ``concurrent.futures.Future`` for loading the data."""
         return self._future
@@ -306,7 +361,7 @@ class ChunkLocation:
         if self._data is None:
             if not self._future.done():
                 raise RuntimeError(
-                    "Cannot access ``chunk_spot.data`` when the data is not yet loaded."
+                    "Cannot access ``chunk_location.data`` when the data is not yet loaded."
                 )
             self._data = self._future.result()
         return self._data

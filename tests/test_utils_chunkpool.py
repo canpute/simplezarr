@@ -1,13 +1,13 @@
 import os
 import time
 import asyncio
+from concurrent.futures import Future
 
 from simplezarr import MemoryStore, SlowStore, open_zarr
 from simplezarr.utils.chunkpool import (
     ChunkPool,
     ChunkLocation,
     ChunkManager,
-    create_chunk_pools_from_zarr_node,
 )
 
 import numpy as np
@@ -60,11 +60,10 @@ store = SlowStore(MemoryStore(store_data), base_delay=0.25)
 
 
 def test_chunk_pool_simple():
-
     g = open_zarr(store)
 
     # Create a pool from the fake data
-    pools = create_chunk_pools_from_zarr_node(g)
+    pools = ChunkPool.from_zarr_node(g)
     assert len(pools) == 1
     pool = pools[0]
     assert isinstance(pool, ChunkPool)
@@ -82,6 +81,7 @@ def test_chunk_pool_simple():
 
     # Check some basics
     assert isinstance(chunk1a, ChunkLocation)
+    assert isinstance(chunk1a.future, Future)
     assert chunk1a.scale_info.spatial_chunk_shape == (50, 50)
     assert chunk1a.level == 0
     assert chunk1a.index == (0, 0)
@@ -118,10 +118,9 @@ def test_chunk_pool_simple():
 
 
 def test_chunk_pool_multiuser():
-
     # Create a pool
     g = open_zarr(store)
-    pools = create_chunk_pools_from_zarr_node(g)
+    pools = ChunkPool.from_zarr_node(g)
     pool = pools[0]
 
     # Create some chunks
@@ -182,9 +181,8 @@ def test_chunk_pool_multiuser():
 
 
 def test_chunk_pool_handlers():
-
     # Get pool
-    pools = create_chunk_pools_from_zarr_node(open_zarr(store))
+    pools = ChunkPool.from_zarr_node(open_zarr(store))
     pool = pools[0]
 
     events = []
@@ -240,16 +238,35 @@ def test_chunk_pool_handlers():
     ]
     events.clear()
 
+    # Requesting an existing chunk also calls the load event
+    _chunk1c = pool.get_chunk(
+        0,
+        (0, 0),
+        "r1a",
+        load_handler=on_load1,
+        drop_handler=on_drop,
+        destroy_handler=on_destroy,
+    )
+
+    assert events == ["load (0, 0) 1"]
+    events.clear()
+
     # Drop them
 
     pool.drop_chunk(0, (0, 0), "r1a")
-    assert events == ["drop (0, 0)"]
+    assert events == ["drop (0, 0)", "drop (0, 0)"]
+    events.clear()
 
     pool.drop_chunk(0, (0, 0), "r1a")  # nothing
-    assert events == ["drop (0, 0)"]
+    assert events == []
 
     pool.drop_chunk(0, (0, 0), "r1b")
-    assert events == ["drop (0, 0)", "drop (0, 0)", "destroy (0, 0)", "destroy (0, 0)"]
+    assert events == [
+        "drop (0, 0)",
+        "destroy (0, 0)",
+        "destroy (0, 0)",
+        "destroy (0, 0)",
+    ]
     events.clear()
 
     # Destroy drops last one
@@ -262,7 +279,7 @@ def test_chunk_pool_handlers_async_load():
 
     sleep_time = 0.5
 
-    pools = create_chunk_pools_from_zarr_node(open_zarr(store))
+    pools = ChunkPool.from_zarr_node(open_zarr(store))
     pool = pools[0]
 
     events = []
@@ -337,8 +354,7 @@ def test_chunk_pool_handlers_async_load():
 
 
 def test_chunk_manager():
-
-    pools = create_chunk_pools_from_zarr_node(open_zarr(store))
+    pools = ChunkPool.from_zarr_node(open_zarr(store))
     pool = pools[0]
 
     events = []
@@ -376,6 +392,78 @@ def test_chunk_manager():
     assert events == ["drop (0, 0)", "destroy (0, 0)", "destroy (0, 0)"]
     events.clear()
 
+    assert len(list(pool.iter_chunks())) == 0
+
+
+def test_chunk_caching():
+    pools = ChunkPool.from_zarr_node(open_zarr(store), cache_size=2)
+    pool = pools[0]
+
+    # Create some chunks
+    chunk1 = pool.get_chunk(0, (0, 0))
+    chunk2 = pool.get_chunk(0, (0, 1))
+    chunk3 = pool.get_chunk(0, (1, 0))
+    chunk4 = pool.get_chunk(0, (1, 1))
+
+    chunks = chunk1, chunk2, chunk3, chunk4
+
+    assert len(pool._loaded_chunks) == 4
+    assert len(pool._cached_chunks) == 0
+    assert pool.memory_usage == 40000
+    for chunk in chunks:
+        assert chunk in list(pool.iter_chunks())
+
+    # Drop two chunks
+    pool.drop_chunk(0, (0, 0))
+    pool.drop_chunk(0, (0, 1))
+    assert not chunk1.refs
+    assert not chunk2.refs
+
+    assert len(pool._loaded_chunks) == 2
+    assert len(pool._cached_chunks) == 2
+    assert pool.memory_usage == 40000
+    for chunk in chunks:
+        assert chunk in list(pool.iter_chunks())
+
+    # Getting one resuses it
+    chunk1a = pool.get_chunk(0, (0, 0))
+    assert chunk1a is chunk1
+    assert chunk1.refs
+
+    assert len(pool._loaded_chunks) == 3
+    assert len(pool._cached_chunks) == 1
+    assert pool.memory_usage == 40000
+    for chunk in chunks:
+        assert chunk in list(pool.iter_chunks())
+
+    # Drop two more
+    pool.drop_chunk(0, (0, 0))
+    pool.drop_chunk(0, (1, 0))
+
+    assert len(pool._loaded_chunks) == 1
+    assert len(pool._cached_chunks) == 2
+    assert pool.memory_usage == 30000
+    for chunk in (chunk1, chunk3, chunk4):
+        assert chunk in list(pool.iter_chunks())
+    assert chunk2 not in pool.iter_chunks()
+
+    # Drop last one
+    pool.drop_chunk(0, (1, 1))
+
+    assert len(pool._loaded_chunks) == 0
+    assert len(pool._cached_chunks) == 2
+    assert pool.memory_usage == 20000
+    assert chunk1 not in pool.iter_chunks()
+    assert chunk2 not in pool.iter_chunks()
+    assert chunk3 in pool.iter_chunks()
+    assert chunk4 in pool.iter_chunks()
+
+    # Destroy
+
+    pool.destroy()
+    assert len(pool._loaded_chunks) == 0
+    assert len(pool._cached_chunks) == 0
+    assert pool.memory_usage == 0
     assert len(list(pool.iter_chunks())) == 0
 
 

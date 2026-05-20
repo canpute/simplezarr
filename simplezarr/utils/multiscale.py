@@ -37,7 +37,7 @@ class MultiscaleInfo:
 class ScaleInfo:
     """Information that represents a single scale in a multiscale image."""
 
-    array: simplezarr.ZarrArray  #: the actual array object
+    array: simplezarr.ZarrArray  #: the ZarrArray object
     level: int  #: the integer level in the multiscale stack, 0 being the highest-resolution
     mean_scale: float  #: the reference scale for this scale layer in world units (the average of the spatial scales)
     spatial_shape: tuple[int, ...]  #: The shape of the spatial dimensions
