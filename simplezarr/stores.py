@@ -25,7 +25,9 @@ Further, the spec seems to assume that there is no dash prefix; so "a/b", rather
 than "/a/b". We follow this in the stores.
 """
 
+from __future__ import annotations
 from pathlib import Path
+import time
 
 __all__ = [
     "BaseStore",
@@ -33,8 +35,9 @@ __all__ = [
     "LocalStore",
     "MemoryStore",
     "ReadableStore",
-    "WrapperStore",
     "WritableStore",
+    "WrapperStore",
+    "SlowStore",
 ]
 
 List = list  # for typing
@@ -436,6 +439,51 @@ class WrapperStore(ReadableStore, WritableStore, ListableStore):
         result = self._store.list_dir(prefix)
         self.hook("list_dir", (prefix,), result)
         return result
+
+
+class SlowStore(WrapperStore):
+    """A store that has a fixed time delay for reads and writes."""
+
+    def __init__(
+        self,
+        store: ReadableStore | WritableStore | ListableStore,
+        base_delay: float = 1.0,
+        bits_per_second: float = 0.0,
+    ):
+        super().__init__(store)
+        self._base_delay = base_delay
+        self._bits_per_second = bits_per_second
+
+    def _sleep(self, nbytes: int):
+        delay = self._base_delay
+
+        if self._bits_per_second > 0:
+            delay += (nbytes * 8) / self._bits_per_second
+
+        if delay > 0:
+            time.sleep(delay)
+
+    def hook(self, method, args, result):
+        # read delay
+        if method == "get":
+            self._sleep(len(result))
+
+        elif method == "get_partial_values":
+            self._sleep(sum(len(x) for x in result))
+
+        # write delay
+        elif method == "set":
+            key, value = args
+            self._sleep(len(value))
+
+        elif method == "set_partial_values":
+            (key_start_values,) = args
+            self._sleep(sum(len(value) for _, _, value in key_start_values))
+
+        # base delay
+        else:
+            if self._base_delay > 0:
+                time.sleep(self._base_delay)
 
 
 # More store ideas:
