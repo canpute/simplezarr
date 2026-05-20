@@ -7,7 +7,6 @@ current form, the "labels", "plate" and "well" metadata are also ignored.
 
 The purpose of this module is to examine the metadata of a Zarr file and produce
 typed structures to easily process the data further.
-
 """
 
 from __future__ import annotations

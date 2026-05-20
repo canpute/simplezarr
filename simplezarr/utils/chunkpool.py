@@ -1,6 +1,15 @@
 """
-The ChunkPool object keeps track of the individual chunks. Freeing the chunks when no longer used.
-of chunks, and free chunks when no longer needed.
+The ChunkPool object keeps track of the individual chunks, making it easier to
+manage them, by getting and dropping chunks. The pool supports multiple 'users',
+only destroying chunks when no user use it anymore. Caching is also supported,
+enabling the pool to retain unused chunks, making acquiring these chunks later
+much faster. The pool also supports callbacks for a chunks lifetime events
+(load, drop, destroy).
+
+The ChunkManager is a thin class that leverages the multi-user and callbacks.
+One can subclass it to easily manage chunks throughout their lifetime. So you
+can get a clear separation between code that determines what chunks to load and
+drop, while other code determines what actually happens to the chunks.
 """
 
 from __future__ import annotations
@@ -19,7 +28,7 @@ from simplezarr.utils.multiscale import (
 )
 
 
-__all__ = ["ChunkPool", "ChunkManager", "ChunkLocation"]
+__all__ = ["ChunkLocation", "ChunkManager", "ChunkPool"]
 
 
 class ChunkPool:
@@ -95,7 +104,7 @@ class ChunkPool:
         if call_soon_threadsafe == "none":
             self._call_soon_threadsafe = None
         elif call_soon_threadsafe == "asyncio":
-            import asyncio  # noqa
+            import asyncio
 
             self._call_soon_threadsafe = asyncio.get_running_loop().call_soon_threadsafe
         elif callable(call_soon_threadsafe):

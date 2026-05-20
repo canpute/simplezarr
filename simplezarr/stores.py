@@ -35,9 +35,9 @@ __all__ = [
     "LocalStore",
     "MemoryStore",
     "ReadableStore",
-    "WritableStore",
-    "WrapperStore",
     "SlowStore",
+    "WrapperStore",
+    "WritableStore",
 ]
 
 List = list  # for typing
