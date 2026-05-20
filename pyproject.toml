@@ -9,7 +9,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Almar Klein" }]
 keywords = ["zarr"]
 requires-python = ">= 3.10"
-dependencies = ['numpy']
+dependencies = ['numpy', 'numcodecs']
 [project.optional-dependencies]
 lint = ["ruff", "pre-commit"]
 docs = ["sphinx>7.2", "sphinx_rtd_theme"]
