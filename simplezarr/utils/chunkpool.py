@@ -5,9 +5,7 @@ of chunks, and free chunks when no longer needed.
 
 from __future__ import annotations
 
-import asyncio
-from itertools import count as Counter  # noqa: N812
-from typing import Generator
+from typing import Generator, Callable, Literal
 
 import numpy as np
 import simplezarr
@@ -17,8 +15,6 @@ from simplezarr.utils.multiscale import (
     MultiscaleInfo,
     ScaleInfo,
 )
-
-ref_counter = Counter()
 
 
 def create_chunk_pools_from_zarr_node(
@@ -36,9 +32,9 @@ def create_chunk_pools_from_zarr_node(
 class ChunkPool:
     """An object to get access to individual chunks, with support for caching and parallel loading."""
 
-    def __init__(self, multiscale_info: MultiscaleInfo, call_soon_threadsafe=None):
+    def __init__(self, multiscale_info: MultiscaleInfo):
         self._multiscale_info = multiscale_info
-        self._call_soon_threadsafe = call_soon_threadsafe
+        self._call_soon_threadsafe = None
         self._chunks = []  # level -> chunk_index -> ChunkLocation
         for _ in range(len(self._multiscale_info.scales)):
             self._chunks.append({})
@@ -48,11 +44,42 @@ class ChunkPool:
 
     @property
     def multiscale_info(self) -> MultiscaleInfo:
-        """Get the object that represents the information on the multiscale image."""
+        """The ``MultiscaleInfo`` object that represents the information on the multiscale image."""
         return self._multiscale_info
 
+    def enable_async_load_handlers(
+        self, call_soon_threadsafe: Callable | Literal["asyncio", "none"]
+    ):
+        """Set the pool up to asynchronously call the load-handlers.
+
+        In normal operation, the load-handlers only get invoked when the
+        ChunkLocation objects are waited upon, either by
+        ``chunk_location.wait()`` or ``chunk_pool.wait_for_chunks_to_load()``.
+        With async enabled, the load-handlers are fired as soon as the data is
+        loaded. This behaviour is especially intended for interactive
+        applications such as data viewers.
+
+        The async behaviour does not depend on asyncio, but can be used with any
+        framework that can provide a ``call_soon_threadsafe()`` function. That
+        said, asyncio is the most common use-case, so one can simply do
+        ``enable_async_load_handlers("asyncio")``. Use
+        ``enable_async_load_handlers("none")`` to turn off again.
+        """
+        if call_soon_threadsafe == "none":
+            self._call_soon_threadsafe = None
+        elif call_soon_threadsafe == "asyncio":
+            import asyncio  # noqa
+
+            self._call_soon_threadsafe = asyncio.get_running_loop().call_soon_threadsafe
+        elif callable(call_soon_threadsafe):
+            self._call_soon_threadsafe = call_soon_threadsafe
+        else:
+            raise TypeError(
+                "CheckPool.enable_async_load_handlers(): unexpected call_soon_threadsafe value: {call_soon_threadsafe!r}"
+            )
+
     def destroy(self):
-        """Clear all chunks."""
+        """Drop and destroy all chunks."""
         for chunk_dict in self._chunks:
             chunks = list(chunk_dict.values())
             chunk_dict.clear()
@@ -96,11 +123,10 @@ class ChunkPool:
             for chunk_spot in chunk_spots:
                 chunk_spot.wait()
 
-        In applications using asyncio, you can asynchronously process chunks as
-        soon as they are loaded::
+        Handlers can be registered that are called when the chunk's data loads, the chunk is dropped (for this ref), and when the chunk is destroyed (has no more refs).
 
             def load_handler(chunk_spot):
-               ...  # this func can also be async
+               ...
 
             pool.get_chunk(..., load_handler=load_handler)
 
@@ -114,17 +140,8 @@ class ChunkPool:
             chunk_spot = ChunkLocation(chunk_info, chunk_index)
             self._chunks[level][chunk_index] = chunk_spot
 
-        call_soon_threadsafe = self._call_soon_threadsafe
-        if call_soon_threadsafe is None and load_handler is not None:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-            if loop is not None:
-                call_soon_threadsafe = loop.call_soon_threadsafe
-
         chunk_spot._register(
-            ref, call_soon_threadsafe, load_handler, drop_handler, destroy_handler
+            ref, self._call_soon_threadsafe, load_handler, drop_handler, destroy_handler
         )
 
         return chunk_spot
@@ -156,7 +173,7 @@ class ChunkPool:
 
 
 class ChunkLocation:
-    """An Object that represents a chunk location."""
+    """An object that represents a chunk location."""
 
     def __init__(self, scale_info: ScaleInfo, index: tuple[int, ...]):
         self._scale_info = scale_info
@@ -165,7 +182,6 @@ class ChunkLocation:
         self._refs = set()
         self._data = None
         self._future = scale_info.array.get_chunk_future(index)
-        print("future", self._future.running(), self._future.done())
         self._load_handlers = {}
         self._drop_handlers = {}
         self._destroy_handlers = {}
@@ -196,7 +212,6 @@ class ChunkLocation:
 
         When this property is accessed before the data is loaded, a RuntimeError is raised.
         """
-        print("future", self._future.running(), self._future.done())
         if self._data is None:
             if not self._future.done():
                 raise RuntimeError(
@@ -247,11 +262,12 @@ class ChunkLocation:
                 func(self)
 
     def _process_load_handlers(self):
-        for ref in list(self._load_handlers.keys()):
-            handlers = self._load_handlers.pop(ref, [])
-            self._invoke_handlers(
-                f"ChunkLocation load callback for ref {ref!r}", *handlers
-            )
+        if self._future is not None:
+            for ref in list(self._load_handlers.keys()):
+                handlers = self._load_handlers.pop(ref, [])
+                self._invoke_handlers(
+                    f"ChunkLocation load callback for ref {ref!r}", *handlers
+                )
 
     def _drop(self, ref: str):
         self._refs.discard(ref)

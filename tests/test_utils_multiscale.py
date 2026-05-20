@@ -44,7 +44,7 @@ store_data2 = {
             "node_type": "group",
             "attributes": {
                 "ome": {
-                    "version": 0.5,
+                    "version": "0.5",
                     "multiscales": [
                         {
                             "name": "a multiscale image",

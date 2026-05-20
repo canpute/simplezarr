@@ -130,7 +130,7 @@ def create_scale_infos_from_ome_zarr_group(
 ) -> list[MultiscaleInfo]:
     zarr_info = zarr_group.metadata
     ome_info = zarr_info["attributes"]["ome"]
-    ome_version = tuple(int(x) for x in ome_info["version"].split("."))
+    ome_version = tuple(int(x) for x in str(ome_info["version"]).split("."))
     assert ome_version >= (0, 5)  # this code assumes 0.5
 
     # “multiscales” contains a list of dictionaries where each entry describes a multiscale image.
