@@ -15,7 +15,7 @@ from .stores import BaseStore, ReadableStore, WritableStore, ListableStore
 from .codecs import create_ndarray_type, encode_array, decode_bytes
 
 
-__all__ = ["open_zarr", "ZarrNode", "ZarrGroup", "ZarrArray"]
+__all__ = ["ZarrArray", "ZarrGroup", "ZarrNode", "open_zarr"]
 
 
 # Create executor to allow parallel reads and writes
@@ -227,7 +227,12 @@ class ZarrArray(ZarrNode):
 
     @property
     def dtype(self) -> str:
-        """The datatype of the array."""
+        """The datatype of the array.
+
+        Possible values include 'bool', 'int8', 'int16', 'int32', 'int64',
+        'uint8', 'uint16', 'uint32', 'uint64', 'float16', 'float32', 'float64',
+        'complex64', 'complex128', 'rx' (with x a multiple of 8).
+        """
         return self._dtype
 
     @property
@@ -246,6 +251,11 @@ class ZarrArray(ZarrNode):
         return int(np.prod(self._shape))
 
     @property
+    def nbytes(self) -> int:
+        """The size of the array in bytes (uncompressed)."""
+        return int(self.size * self._dtype_bits / 8)
+
+    @property
     def chunk_grid_shape(self) -> tuple[int, ...]:
         """The shape of the chunk grid (ndim elements)."""
         return self._chunk_grid_shape
@@ -259,6 +269,11 @@ class ZarrArray(ZarrNode):
     def chunk_size(self) -> int:
         """The size of each chunk, in number of elements."""
         return int(np.prod(self._chunk_shape))
+
+    @property
+    def chunk_nbytes(self) -> int:
+        """The size of each chunk in (uncompressed) bytes."""
+        return int(self.chunk_size * self._dtype_bits / 8)
 
     # TODO: maybe rename to get_chunk_sync, and rename get_chunk_promise to get_chunk
     def get_chunk(self, index) -> np.ndarray:
@@ -279,7 +294,9 @@ class ZarrArray(ZarrNode):
             raise ValueError("ZarrArray.get_chunk() needs integer indices.")
 
         # Load data. This could take a while if it's a remote/slow store
-        path = self._path + "/c/" + self._chunk_separator.join(f"{x}" for x in index)
+        path = "c/" + self._chunk_separator.join(f"{x}" for x in index)
+        if self._path:
+            path = self._path + "/" + path
         try:
             encoded_bytes = self._store.get(path)
         except IOError:
@@ -409,7 +426,12 @@ class ZarrArray(ZarrNode):
         assert meta["node_type"] == "array"
 
         self._shape = tuple(int(i) for i in meta["shape"])
-        self._dtype = meta["data_type"]
+        self._dtype = dtype = meta["data_type"]
+
+        i = len(dtype)
+        while i > 0 and dtype[i - 1].isdigit():
+            i -= 1
+        self._dtype_bits = int(dtype[i:]) if i < len(dtype) else 8
 
         self._chunk_grid = meta["chunk_grid"]
         assert self._chunk_grid["name"] == "regular"

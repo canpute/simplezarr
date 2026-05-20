@@ -2,7 +2,6 @@ from simplezarr.stores import MemoryStore
 from simplezarr.nodes import open_zarr, ZarrNode, ZarrGroup, ZarrArray
 
 import numpy as np
-import pytest
 
 
 # Create an in-memory zarr file
@@ -98,6 +97,7 @@ g = open_zarr(store)
 def test_zarr_group():
     g = open_zarr(store)
 
+    assert isinstance(g, ZarrNode)
     assert isinstance(g, ZarrGroup)
 
     # Structure info
@@ -143,6 +143,7 @@ def test_zarr_array1():
     g = open_zarr(store)
     a1 = g["sub/array1"]
 
+    assert isinstance(g, ZarrNode)
     assert isinstance(a1, ZarrArray)
     assert a1.ndim == 3
     assert a1.shape == (8, 6, 4)

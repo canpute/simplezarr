@@ -31,13 +31,13 @@ import time
 
 __all__ = [
     "BaseStore",
-    "ReadableStore",
-    "WritableStore",
     "ListableStore",
-    "MemoryStore",
     "LocalStore",
-    "WrapperStore",
+    "MemoryStore",
+    "ReadableStore",
     "SlowStore",
+    "WrapperStore",
+    "WritableStore",
 ]
 
 List = list  # for typing
