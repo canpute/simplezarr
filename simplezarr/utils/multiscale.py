@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import simplezarr
 from simplezarr.utils.units import SPACE_UNITS
-from simplezarr.utils.logs import logger
+from simplezarr.misc import logger
 
 
 MSG_PREFIX = "simplezarr.utils.multiscale"

@@ -5,12 +5,13 @@ of chunks, and free chunks when no longer needed.
 
 from __future__ import annotations
 
+import sys
 from typing import Generator, Callable, Literal
 from itertools import count as Count
 
 import numpy as np
 import simplezarr
-from simplezarr.utils.logs import log_exception
+from simplezarr.misc import logger
 from simplezarr.utils.multiscale import (
     create_scale_infos_from_zarr_node,
     MultiscaleInfo,
@@ -404,8 +405,16 @@ class ChunkLocation:
 
     def _invoke_handlers(self, what, *handlers):
         for func in handlers:
-            with log_exception(what):
+            try:
                 func(self)
+            except Exception as err:
+                # Store exc info for postmortem debugging
+                exc_info = list(sys.exc_info())
+                exc_info[2] = exc_info[2].tb_next  # type: ignore | skip *this* function
+                sys.last_type, sys.last_value, sys.last_traceback = exc_info
+                # Provide the exception, so the default logger prints a stacktrace.
+                # IDE's can get the exception from the root logger for PM debugging.
+                logger.error(what, exc_info=err)
 
     def _process_load_handlers(self):
         if self._future is not None:
