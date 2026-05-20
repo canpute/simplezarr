@@ -20,22 +20,31 @@ What is not yet supported:
 
 * Writing Zarr files.
 * Indexing (wip).
+* Sharding.
 
 
 ## Motivation
 
-Zarr 3 is a great file format for large datasets. It's nice and elegant. In
-using Zarr via zarr-python, we ran into performance issues, and upon
+Zarr 3 is a great file format for large datasets. It's nice and elegant. The
+`simplezarr` lib is what happened when we took the Zarr 3 spec, and implemented
+it as directly as possible.
+
+Parallelism is achieved using a thread-pool and `concurrent.futures.Future`
+objects. And in once place exactly: the code that reads a chunk (`ZarrArray.get_chunk_future()`).
+
+We don't force asyncio. In fact, ``simplezarr`` does not even import
+asyncio (except in code paths that represent a utility specific to asyncio
+users).
+
+## Comparison with zarr-python
+
+Why not use zarr-python? We ran into performance issues, and upon
 investigating what happens under the hood, we found it hard to follow the path
 that the code takes, especially regarding threading and asyncio. Granted, part
 of that complexity is because it must support older Zarr versions as well.
-
-We figured, what happens if we take the Zarr 3 spec, and just implemented as
-directly as possible?
-
-Another reason is that there seems to be no way to read individual blocks
+Another reason is that zarr-python does not seem to have a way to read individual blocks
 asynchronously (`AsyncArray.get_block_selection()` does not exist), which was a
-requirement for our application.
+requirement for our use-case.
 
 ### What zarr-python does
 
@@ -53,8 +62,7 @@ It looks like this complexity is one of the reasons why the performance of ome-z
 
 * Stores are synchronous.
 * `simplezarr.Array.get_chunk()` is synchronous (no threading or async).
-* `simplezarr.Array.get_chunk_future()` uses a `ThreadPoolExecutor`. It returns a `concurrent.futures.Future`. No asyncio anywhere.
-* This is enough to make it trivial to concurrently read multiple chunks.
-* And `asyncio` can be "enabled" using `await asyncio.wrap_future(f)`.
-
-This means that users has simple building blocks to integrate in any scenario, also without Asyncio or Trio.
+* `simplezarr.Array.get_chunk_future()` uses a `ThreadPoolExecutor`. It returns a `concurrent.futures.Future`.
+* This is enough to support concurrently reads.
+* No asyncio anywhere.
+* But can be used in `asyncio` (and other frameworks) using `await asyncio.wrap_future(f)` or `f.add_done_callback(call_soon_threadsafe)`.

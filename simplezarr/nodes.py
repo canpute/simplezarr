@@ -219,8 +219,6 @@ class ZarrArray(ZarrNode):
     to load data from the store, and provide these as numpy arrays.
     """
 
-    # todo: could add info on chunks
-
     def _one_line_repr(self):
         shape_str = "x".join(str(i) for i in self.shape)
         return f"<{self.__class__.__name__} '{self._path}' {shape_str} {self.dtype} at {hex(id(self))}>"
@@ -275,9 +273,11 @@ class ZarrArray(ZarrNode):
         """The size of each chunk in (uncompressed) bytes."""
         return int(self.chunk_size * self._dtype_bits / 8)
 
-    # TODO: maybe rename to get_chunk_sync, and rename get_chunk_promise to get_chunk
     def get_chunk(self, index) -> np.ndarray:
-        """Read a chunk.
+        """Read a chunk from the store.
+
+        This function is synchronous; you may want to use ``get_chunk_future()``
+        to do the loading and decompression in a separate thread.
 
         Converts the index to the path for that chunk, load the bytes
         from the store, and decode them into a numpy array. This
@@ -440,7 +440,7 @@ class ZarrArray(ZarrNode):
         self._chunk_grid_shape = tuple(
             math.ceil(array_s / chunk_s)
             for array_s, chunk_s in zip(self._shape, self._chunk_shape, strict=True)
-        )  # TODO: rename to grid_shape?
+        )
 
         self._chunk_key_encoding = meta["chunk_key_encoding"]
         assert self._chunk_key_encoding["name"] == "default"
