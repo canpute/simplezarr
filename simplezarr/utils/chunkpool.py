@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import sys
 from typing import Generator, Callable, Literal
-from itertools import count as Count
+from itertools import count as Count  # noqa: N812
 
 import numpy as np
 import simplezarr
