@@ -320,7 +320,7 @@ def test_gzip_codec():
 
     # Test compression levels
     mem1 = GzipCodec(level=0).encode(mem0)
-    mem2 = GzipCodec(level=3).encode(mem0)
+    mem2 = GzipCodec(level=1).encode(mem0)
     mem3 = GzipCodec(level=9).encode(mem0)
 
     assert len(mem0) == 10000
