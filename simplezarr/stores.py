@@ -353,7 +353,7 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
     def list(self) -> list[str]:
         return sorted(
             [
-                str(p.relative_to(self._path))
+                p.relative_to(self._path).as_posix()
                 for p in self._path.rglob("*")
                 if p.is_file()
             ]
@@ -363,7 +363,7 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
         check_prefix(self, "list_prefix", prefix)
         d = self._path.joinpath(*prefix.split("/"))
         return sorted(
-            [str(p.relative_to(self._path)) for p in d.rglob("*") if p.is_file()]
+            [p.relative_to(self._path).as_posix() for p in d.rglob("*") if p.is_file()]
         )
 
     def list_dir(self, prefix: str) -> list[str]:
@@ -373,7 +373,7 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
             return []
         keys = set()
         for p in d.iterdir():
-            key = str(p.relative_to(self._path))
+            key = p.relative_to(self._path).as_posix()
             dash = "/" if p.is_dir() else ""
             keys.add(key + dash)
         return sorted(keys)
