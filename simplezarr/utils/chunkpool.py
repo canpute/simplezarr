@@ -1,4 +1,6 @@
 """
+Support for managing a pool of chunks, multi-user, with caching and lifetime handlers.
+
 The ChunkPool object keeps track of the individual chunks, making it easier to
 manage them, by getting and dropping chunks. The pool supports multiple 'users',
 only destroying chunks when no user use it anymore. Caching is also supported,
@@ -21,23 +23,18 @@ from itertools import count as Count  # noqa: N812
 import numpy as np
 import simplezarr
 from simplezarr.misc import logger
-from simplezarr.utils.multiscale import (
-    create_scale_infos_from_zarr_node,
-    MultiscaleInfo,
-    ScaleInfo,
-)
+from simplezarr.utils.multiscale import MultiscaleInfo, ScaleInfo
 
 
-__all__ = ["ChunkLocation", "ChunkManager", "ChunkPool"]
+__all__ = ["ChunkPool", "ChunkManager", "ChunkLocation"]
 
 
 class ChunkPool:
     """An object to get access to individual chunks, with support for caching and parallel loading.
 
-    Parameters
-    ----------
-    multiscale_info : MultiscaleInfo
-        The multiscale_info object for which to create a pool.
+    Arguments:
+        multiscale_info : MultiscaleInfo
+            The multiscale_info object for which to create a pool.
 
     Cache behavior
     --------------
@@ -60,7 +57,7 @@ class ChunkPool:
         cls, zarr_node: simplezarr.ZarrNode, cache_size: int = 0
     ) -> list[ChunkPool]:
         """Create a ``ChuckPool`` for every (multiscale) image in the given Zarr node."""
-        multiscale_infos = create_scale_infos_from_zarr_node(zarr_node)
+        multiscale_infos = MultiscaleInfo.from_zarr_node(zarr_node)
         pools = []
         for multiscale_info in multiscale_infos:
             pool = cls(multiscale_info, cache_size)
@@ -139,26 +136,24 @@ class ChunkPool:
     ) -> ChunkLocation:
         """Get a ChunkLocation object.
 
-        Parameters
-        ----------
-        level : int
-            The scale level for the requested chunk.
-        index : tuple[int, ...]
-            The index for the requested chunk.
-        ref : str
-            The reference to identify the code that requests the chunk. Default 'pool'.
-            This is used by the pool to ref-count the chunk usage and destroy
-            the chunk when there are no more refs left. Also see the ``ChunkManager``.
-        handlers : callable
-            Functions that will be called at specific lifetime events of the
-            chunk.
+        Arguments:
+            level : int
+                The scale level for the requested chunk.
+            index : tuple[int, ...]
+                The index for the requested chunk.
+            ref : str
+                The reference to identify the code that requests the chunk. Default 'pool'.
+                This is used by the pool to ref-count the chunk usage and destroy
+                the chunk when there are no more refs left. Also see the ``ChunkManager``.
+            handlers : callable
+                Functions that will be called at specific lifetime events of the
+                chunk.
 
-        Returns
-        -------
-        chunk_location : ChunkLocation
-            A representation of the requested chunk. The corresponding data is
-            being loaded but may not be ready yet. If async loading is enabled,
-            the load handler will be called as soon as the data arrives.
+        Returns:
+            chunk_location : ChunkLocation
+                A representation of the requested chunk. The corresponding data is
+                being loaded but may not be ready yet. If async loading is enabled,
+                the load handler will be called as soon as the data arrives.
 
         Individual chunks can be loaded synchronously using::
 
@@ -169,7 +164,7 @@ class ChunkPool:
 
             loop.wait_for_chunks_to_load()
 
-        This is equivalent to:
+        This is equivalent to::
 
             chunk_locations = [...]
             for chunk_location in chunk_locations:
@@ -200,15 +195,14 @@ class ChunkPool:
     def drop_chunk(self, level: int, index: tuple[int, ...], ref: str = "pool") -> None:
         """Release a chunk by their index.
 
-        Parameters
-        ----------
-        level : int
-            The scale level for the requested chunk.
-        index : tuple[int, ...]
-            The index for the requested chunk.
-        ref : str
-            The reference to identify the code that requested the chunk. Default 'pool'.
-            This must be the same value as when ``get_chunk()`` was called.
+        Arguments:
+            level : int
+                The scale level for the requested chunk.
+            index : tuple[int, ...]
+                The index for the requested chunk.
+            ref : str
+                The reference to identify the code that requested the chunk. Default 'pool'.
+                This must be the same value as when ``get_chunk()`` was called.
 
         This drops the chunk, invoking any drop handlers. When the chunk has no
         more refs, the chunk is destroyed. When the code has a single user,
@@ -268,19 +262,17 @@ class ChunkManager:
     def get_chunk(self, level: int, index: tuple[int, ...]):
         """Get a ChunkLocation object.
 
-        Parameters
-        ----------
-        level : int
-            The scale level for the requested chunk.
-        index : tuple[int, ...]
-            The index for the requested chunk.
+        Arguments:
+            level : int
+                The scale level for the requested chunk.
+            index : tuple[int, ...]
+                The index for the requested chunk.
 
-        Returns
-        -------
-        chunk_location : ChunkLocation
-            A representation of the requested chunk. The corresponding data is
-            being loaded but may not be ready yet. If async loading is enabled,
-            the ``on_load`` method will be called as soon as the data arrives.
+        Returns:
+            chunk_location : ChunkLocation
+                A representation of the requested chunk. The corresponding data is
+                being loaded but may not be ready yet. If async loading is enabled,
+                the ``on_load`` method will be called as soon as the data arrives.
 
         The managers ``on_load``, ``on_drop``, and ``on_destroy``, are automatically registered as handlers.
         """
@@ -297,12 +289,11 @@ class ChunkManager:
     def drop_chunk(self, level: int, index: tuple[int, ...]) -> None:
         """Release a chunk by their index.
 
-        Parameters
-        ----------
-        level : int
-            The scale level for the requested chunk.
-        index : tuple[int, ...]
-            The index for the requested chunk.
+        Arguments:
+            level : int
+                The scale level for the requested chunk.
+            index : tuple[int, ...]
+                The index for the requested chunk.
 
         This drops the chunk, invoking any drop handlers. When the chunk has no
         more refs, the chunk is destroyed.

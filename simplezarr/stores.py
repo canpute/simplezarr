@@ -1,29 +1,38 @@
 """
-The store interface and implementations. This code follows the abstract store
-interface as defines in the Zarr spec:
+Zarr data is stored as a set of key-value pairs. This can be a directory with
+files on your hard-drive. Or a Python dict in memory, or a remote resource
+accessible over the internet.
 
-    https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html
-
-Some quotes from the spec, for easy reference:
-
-* The store interface is intended to be simple to implement using a variety of
-  different underlying storage technologies.
-* It is assumed that the store holds (key, value) pairs, with only one such pair
-  for any given key. I.e., a store is a mapping from keys to values.
-* It is also assumed that keys are case sensitive, i.e., the keys “foo” and
-  “FOO” are different.
-* In the context of this interface, a key is a Unicode string, where the final
-  character is not a '/' character.
-* In the context of this interface, a prefix is a string containing only
-  characters that are valid for use in keys and ending with a trailing '/'
-  character.
-* The store operations are grouped into three sets of capabilities: readable,
-  writeable and listable. It is not necessary for a store implementation to
-  support all of these capabilities.
-
-Further, the spec seems to assume that there is no dash prefix; so "a/b", rather
-than "/a/b". We follow this in the stores.
+Stores give access to that data in a consistent way, so that the code that
+reads/writes the Zarr data does not have to care how/where the data is stored.
+Multiple implementations are provided. But also wrapper stores for various
+purposes.
 """
+
+# The store interface and implementations. This code follows the abstract store
+# interface as defines in the Zarr spec:
+#
+#     https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html
+#
+# Some quotes from the spec, for easy reference:
+#
+# * The store interface is intended to be simple to implement using a variety of
+#   different underlying storage technologies.
+# * It is assumed that the store holds (key, value) pairs, with only one such pair
+#   for any given key. I.e., a store is a mapping from keys to values.
+# * It is also assumed that keys are case sensitive, i.e., the keys “foo” and
+#   “FOO” are different.
+# * In the context of this interface, a key is a Unicode string, where the final
+#   character is not a '/' character.
+# * In the context of this interface, a prefix is a string containing only
+#   characters that are valid for use in keys and ending with a trailing '/'
+#   character.
+# * The store operations are grouped into three sets of capabilities: readable,
+#   writeable and listable. It is not necessary for a store implementation to
+#   support all of these capabilities.
+#
+# Further, the spec seems to assume that there is no dash prefix; so "a/b", rather
+# than "/a/b". We follow this in the stores.
 
 from __future__ import annotations
 from pathlib import Path
@@ -31,13 +40,13 @@ import time
 
 __all__ = [
     "BaseStore",
-    "ListableStore",
-    "LocalStore",
-    "MemoryStore",
     "ReadableStore",
-    "SlowStore",
-    "WrapperStore",
     "WritableStore",
+    "ListableStore",
+    "MemoryStore",
+    "LocalStore",
+    "WrapperStore",
+    "SlowStore",
 ]
 
 List = list  # for typing
