@@ -17,7 +17,8 @@ import sys
 ROOT_DIR = os.path.abspath(os.path.join(__file__, "..", ".."))
 sys.path.insert(0, ROOT_DIR)
 
-import simplezarr
+import simplezarr  # noqa: E402
+
 
 # -- Project information -----------------------------------------------------
 
