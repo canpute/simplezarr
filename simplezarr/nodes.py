@@ -1,5 +1,5 @@
 """
-The Zarr node classes: ZarrGroup and ZarrArray.
+Zarr files are made up of a tree of nodes. Each node is either a ``ZarrGroup`` or a ``ZarrArray``. The arrays are the leaf nodes.
 """
 
 from __future__ import annotations  # Using class names for types without Ruff F821
@@ -15,7 +15,12 @@ from .stores import BaseStore, ReadableStore, WritableStore, ListableStore
 from .codecs import create_ndarray_type, encode_array, decode_bytes
 
 
-__all__ = ["ZarrArray", "ZarrGroup", "ZarrNode", "open_zarr"]
+__all__ = [
+    "open_zarr",
+    "ZarrNode",
+    "ZarrGroup",
+    "ZarrArray",
+]
 
 
 # Create executor to allow parallel reads and writes
@@ -235,7 +240,7 @@ class ZarrArray(ZarrNode):
 
     @property
     def ndim(self) -> int:
-        """The number of dimensions of the array.``."""
+        """The number of dimensions of the array (includes spatial, time, and channel dimensions)."""
         return len(self._shape)
 
     @property
@@ -245,7 +250,7 @@ class ZarrArray(ZarrNode):
 
     @property
     def size(self) -> int:
-        """The size of the array, in number of elements."""
+        """The size of the array, expressed in number of elements."""
         return int(np.prod(self._shape))
 
     @property
@@ -315,12 +320,12 @@ class ZarrArray(ZarrNode):
         This has little to do with async programming and asyncio, although the future-object
         can be converted to an awaitable using ``asyncio.wrap_future()``.
 
-        Example to wait for the data:
+        Example to wait for the data::
 
             f = zarr_array.get_chunk_future(...)
             data = f.result()
 
-        Combine multiple reads in parallel:
+        Combine multiple reads in parallel::
 
             f1 = zarr_array.get_chunk_future(...)
             f2 = zarr_array.get_chunk_future(...)
@@ -328,12 +333,12 @@ class ZarrArray(ZarrNode):
 
             data1, data2, data3 = [f.result() for f in [f1, f2, f3]]
 
-        Asynchronously await the data:
+        Asynchronously await the data::
 
             f = zarr_array.get_chunk_future(...)
             data = await asyncio.wrap_future(f)
 
-        Async and parallel reads:
+        Async and parallel reads::
 
             f1 = zarr_array.get_chunk_future(...)
             f2 = zarr_array.get_chunk_future(...)
@@ -389,11 +394,11 @@ class ZarrArray(ZarrNode):
         This has little to do with async programming and asyncio, although the future-object
         can be converted to an awaitable using ``asyncio.wrap_future()``.
 
-        Example to write and forget:
+        Example to write and forget::
 
             f = zarr_array.set_chunk_future(...)
 
-        Combine multiple writes in parallel, and wait for them to finish:
+        Combine multiple writes in parallel, and wait for them to finish::
 
             f1 = zarr_array.set_chunk_future(...)
             f2 = zarr_array.set_chunk_future(...)
@@ -401,12 +406,12 @@ class ZarrArray(ZarrNode):
 
             [f.result() for f in [f1, f2, f3]]
 
-        Asynchronously await the data:
+        Asynchronously await the data::
 
             f = zarr_array.set_chunk_future(...)
             await asyncio.wrap_future(f)
 
-        Async and parallel reads:
+        Async and parallel reads::
 
             f1 = zarr_array.set_chunk_future(...)
             f2 = zarr_array.set_chunk_future(...)

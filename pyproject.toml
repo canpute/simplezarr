@@ -38,6 +38,7 @@ ignore = [
     "E501",   # Line too long
     "RUF012", # Mutable class attributes should be annotated with `typing.ClassVar`
     "E731",   # Do not assign a `lambda` expression, use a `def
+    "RUF022", # __all__ is not sorted
 ]
 
 

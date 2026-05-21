@@ -1,12 +1,13 @@
-"""Support for multiscale images, most notably ome-zarr.
+"""
+Support for multiscale images, most notably ome-zarr.
+
+The purpose of this utility is to examine the metadata of a Zarr file and produce
+typed structures to easily process the data further.
 
 OME-Zarr, a.k.a. next-generation file format (NGFF) builds on Zarr version 3, to
 define hierarchical datasets. This module implements the "multiscales" metadata,
 ignoring the transitional "bioformats2raw.layout" and "omero" metadata. In its
 current form, the "labels", "plate" and "well" metadata are also ignored.
-
-The purpose of this module is to examine the metadata of a Zarr file and produce
-typed structures to easily process the data further.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ import simplezarr
 from simplezarr.utils.units import SPACE_UNITS
 from simplezarr.misc import logger
 
+
+__all__ = ["MultiscaleInfo", "ScaleInfo"]
 
 MSG_PREFIX = "simplezarr.utils.multiscale"
 
@@ -30,6 +33,23 @@ class MultiscaleInfo:
     unit: str  #: the unit for the spatial dimension
     unit_factor: float  #: the factor to map the unit to meters
     scales: list[ScaleInfo]  #: more info per scale
+
+    @classmethod
+    def from_zarr_node(cls, zarr_node: simplezarr.ZarrGroup) -> list[MultiscaleInfo]:
+        """Given a zarr node, produce a list of MultiscaleInfo objects (one per multiscale dict in the metadata).
+
+        This information is geared for use by the ``simplezarr.chunkpool.ChunkPool``.
+        """
+        # The ome-zarr spec: https://ngff.openmicroscopy.org/specifications/
+
+        attributes = zarr_node.metadata.get("attributes", {})
+
+        if "ome" in attributes:
+            return create_scale_infos_from_ome_zarr_group(zarr_node)
+        elif isinstance(zarr_node, simplezarr.ZarrArray):
+            return create_scale_infos_from_zarr_array(zarr_node)
+        else:  # no-cover
+            raise TypeError(f"Cannot get scale infos from {zarr_node!r}")
 
 
 @dataclass
@@ -45,25 +65,6 @@ class ScaleInfo:
     spatial_chunk_shape: tuple[float, ...]  # The chunk shape for the spatial dimensions
     nchannels: int  #: the number of channels for this image
     ntimes: int  #: the number of time-frames for this image
-
-
-def create_scale_infos_from_zarr_node(
-    zarr_node: simplezarr.ZarrGroup,
-) -> list[MultiscaleInfo]:
-    """Given a zarr node, produce a list of MultiscaleInfo objects (one per multiscale dict in the metadata).
-
-    This information is geared for use by the ``simplezarr.chunkpool.ChunkPool``.
-    """
-    # The ome-zarr spec: https://ngff.openmicroscopy.org/specifications/
-
-    attributes = zarr_node.metadata.get("attributes", {})
-
-    if "ome" in attributes:
-        return create_scale_infos_from_ome_zarr_group(zarr_node)
-    elif isinstance(zarr_node, simplezarr.ZarrArray):
-        return create_scale_infos_from_zarr_array(zarr_node)
-    else:  # no-cover
-        raise TypeError(f"Cannot get scale infos from {zarr_node!r}")
 
 
 def create_scale_infos_from_zarr_array(

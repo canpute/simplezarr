@@ -1,9 +1,5 @@
 from simplezarr import MemoryStore, open_zarr, ZarrArray
-from simplezarr.utils.multiscale import (
-    create_scale_infos_from_zarr_node,
-    MultiscaleInfo,
-    ScaleInfo,
-)
+from simplezarr.utils.multiscale import MultiscaleInfo, ScaleInfo
 
 
 store_data1 = {
@@ -149,7 +145,7 @@ store_data2 = {
 }
 
 
-def test_create_scale_infos_from_zarr_node1():
+def test_scale_infos_from_zarr_node1():
     # Test getting scale info from a single array (compat mode)
 
     temp_store_data = store_data1.copy()
@@ -157,7 +153,7 @@ def test_create_scale_infos_from_zarr_node1():
     store = MemoryStore(temp_store_data)
     g = open_zarr(store)
 
-    infos = create_scale_infos_from_zarr_node(g)
+    infos = MultiscaleInfo.from_zarr_node(g)
     assert len(infos) == 1
     info = infos[0]
     assert isinstance(info, MultiscaleInfo)
@@ -181,7 +177,7 @@ def test_create_scale_infos_from_zarr_node1():
     g._shape = (100, 100, 100)
     g._chunk_grid_shape = 1, 1, 1
 
-    infos = create_scale_infos_from_zarr_node(g)
+    infos = MultiscaleInfo.from_zarr_node(g)
     si = infos[0].scales[0]
 
     assert si.spatial_shape == (100, 100, 100)
@@ -192,7 +188,7 @@ def test_create_scale_infos_from_zarr_node1():
     g._shape = (5, 100, 100, 100)
     g._chunk_grid_shape = 1, 1, 1, 1
 
-    infos = create_scale_infos_from_zarr_node(g)
+    infos = MultiscaleInfo.from_zarr_node(g)
     si = infos[0].scales[0]
 
     assert si.spatial_shape == (100, 100, 100)
@@ -203,7 +199,7 @@ def test_create_scale_infos_from_zarr_node1():
     g._shape = (5, 1, 100, 100, 100)
     g._chunk_grid_shape = 1, 1, 1, 1, 1
 
-    infos = create_scale_infos_from_zarr_node(g)
+    infos = MultiscaleInfo.from_zarr_node(g)
     si = infos[0].scales[0]
 
     assert si.spatial_shape == (100, 100, 100)
@@ -211,7 +207,7 @@ def test_create_scale_infos_from_zarr_node1():
     assert si.ntimes == 5
 
 
-def test_create_scale_infos_from_zarr_node2():
+def test_scale_infos_from_zarr_node2():
     # Test getting scale info from a multi-scale OME-Zarr file
 
     temp_store_data = store_data2.copy()
@@ -219,7 +215,7 @@ def test_create_scale_infos_from_zarr_node2():
     store = MemoryStore(temp_store_data)
     g = open_zarr(store)
 
-    infos = create_scale_infos_from_zarr_node(g)
+    infos = MultiscaleInfo.from_zarr_node(g)
     assert len(infos) == 1
     info = infos[0]
     assert isinstance(info, MultiscaleInfo)
@@ -267,12 +263,11 @@ def test_create_scale_infos_from_zarr_node2():
     assert si.ntimes == 0
 
 
-def test_create_scale_infos_from_zarr_node_transforms():
-
+def test_scale_infos_from_zarr_node_transforms():
     temp_store_data = store_data2.copy()
 
     store = MemoryStore(temp_store_data)
-    infos = create_scale_infos_from_zarr_node(open_zarr(store))
+    infos = MultiscaleInfo.from_zarr_node(open_zarr(store))
     info = infos[0]
 
     # scale 0
@@ -305,7 +300,7 @@ def test_create_scale_infos_from_zarr_node_transforms():
     temp_store_data["zarr.json"] = json.encode()
 
     store = MemoryStore(temp_store_data)
-    infos = create_scale_infos_from_zarr_node(open_zarr(store))
+    infos = MultiscaleInfo.from_zarr_node(open_zarr(store))
     info = infos[0]
 
     # scale 0
