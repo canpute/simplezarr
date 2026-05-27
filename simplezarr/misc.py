@@ -1,6 +1,10 @@
+"""
+Misc functionality used in multiple modules.
+"""
+
 import logging
 import atexit
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 
 logger = logging.getLogger("simplezarr")
@@ -11,3 +15,15 @@ logger.setLevel(logging.WARNING)
 # TODO: load it lazily, allow configuring number of workers
 executor = ThreadPoolExecutor(max_workers=8)
 atexit.register(lambda: executor.shutdown())
+
+
+class ZarrFuture(Future):
+    """A subclass of concurrent.futures.Future that has a friendly repr."""
+
+    def __init__(self, description: str):
+        super().__init__()
+        self._for = description
+
+    def __repr__(self):
+        r = super().__repr__()
+        return r.replace(" at ", f" for {self._for} at ")

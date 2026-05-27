@@ -1,3 +1,7 @@
+"""
+Implementation for Zarr array indexing.
+"""
+
 from math import ceil
 from dataclasses import dataclass
 from concurrent.futures import Future
@@ -5,122 +9,59 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .misc import executor
-
+from .misc import executor, ZarrFuture
 
 if TYPE_CHECKING:
     from .nodes import ZarrArray
 
 
-class BaseIndexer:
-    def __init__(self, zarr_array, *, return_future):
-        self._array = zarr_array
-        self._return_future = bool(return_future)
-        self._shape = zarr_array._shape
-        self._grid_shape = zarr_array._chunk_grid_shape
-
-    def _get_chunk_ids_from_chunk_slice(self, selection):
-        grid_shape = self._grid_shape
-        selection, has_slices = normalize_selection(selection, grid_shape)
-
-        if not has_slices:
-            chunk_ids = [selection]
-
-        else:
-
-            def resolve(axis, partial_index, partial_selection):
-                index, remaining_selection = partial_selection[0], partial_selection[1:]
-                if isinstance(index, int):
-                    if index < 0:
-                        index = grid_shape[axis] + index
-                    new_index = (*partial_index, index)
-                    if remaining_selection:
-                        resolve(axis + 1, new_index, remaining_selection)
-                    else:
-                        chunk_ids.append(new_index)
-                elif isinstance(index, slice):
-                    for i in range(*index.indices(grid_shape[axis])):
-                        new_index = (*partial_index, i)
-                        if remaining_selection:
-                            resolve(axis + 1, new_index, remaining_selection)
-                        else:
-                            chunk_ids.append(new_index)
-
-            chunk_ids = []
-            resolve(0, (), selection)
-
-        return chunk_ids
-
-
-class BaseChunkIndexer(BaseIndexer):
-    pass
-
-
-class IndexConverter(BaseIndexer):
-    def __getitem__(self, selection):
-        shape = self._shape
-
-        normalized_selection, _has_slices = normalize_selection(selection, shape)
-
-        # chunk_index_info_list = get_chunk_index_info_from_zarr_array_slice(
-        #     normalized_selection, self._shape. self._array._chunk_shape
-        # )
-        return normalized_selection
-
-
-class DataLoader(BaseIndexer):
-    def __getitem__(self, selection):
-        shape = self._shape
-        chunk_shape = self._array._chunk_shape
-
-        normalized_selection, _has_slices = normalize_selection(selection, shape)
-
-        chunk_index_infos = get_chunk_index_info_from_zarr_array_slice(
-            normalized_selection, shape, chunk_shape
-        )
-
-        return ZarrSubArray(self._array, normalized_selection, chunk_index_infos)
-
-
 class ZarrSubArray:
-    def __init__(self, array, normalized_selection, chunk_index_infos):
+    """A Zarr sub-array that can be used to get and set data."""
+
+    def __init__(self, array: ZarrArray, selection: tuple):
         self._array = array
-        self._chunk_index_infos = chunk_index_infos
+        shape = array._shape
+
+        normalized_selection, _has_slices = normalize_selection(selection, shape)
+        self._index_repr = get_selection_repr(normalized_selection, shape)
+        self._chunk_index_infos = get_chunk_index_info_from_zarr_array_slice(
+            normalized_selection, shape, array._chunk_shape
+        )
 
         # Determine sub array shape
         shape1 = []
         shape2 = []
-        shape3 = []
         for index in normalized_selection:
             if isinstance(index, int):
                 shape2.append(1)
-                shape3.append(0)
             else:  # isinstance(index, slice)
                 i = ceil((index.stop - index.start) / index.step)
                 shape1.append(i)
                 shape2.append(i)
-                shape3.append(i)
         self._shape1 = tuple(shape1)  # shape with collapsed dims
         self._shape2 = tuple(shape2)  # uncollapsed shape
-        self._shape3 = tuple(shape3)  # same but zero for collapsed axis
+
+    def __repr__(self):
+        return f"<{self.__class__.__name__} a[{self._index_repr}] at {hex(id(self))}>"
 
     @property
     def array(self) -> ZarrArray:
+        """The ZarrArray that this is a slice of."""
         return self._array
 
     @property
     def shape(self) -> tuple[int, ...]:
-        """The shape of the sub array."""
+        """The shape of the sub array. Some dimensions can be collapsed, the array can even represent a scalar."""
         return self._shape1
 
-    def get(self):
+    def get(self) -> Future[np.ndarray]:
+        """Get the data for this sub-array as a numpy array. Returns a Future so the caller."""
         chunk_index_infos = self._chunk_index_infos
 
-        # Create array
         array1 = np.empty(self._shape1, self._array.dtype)
         array2 = array1.reshape(self._shape2)
 
-        aggregate_future = Future()
+        aggregate_future = ZarrFuture(f"a[{self._index_repr}].get()")
         aggregator = Aggregator(aggregate_future, array1)
 
         for chunk_index_info in chunk_index_infos:
@@ -139,10 +80,12 @@ class ZarrSubArray:
 
         return aggregate_future
 
-    def get_wait(self):
+    def get_wait(self) -> np.ndarray:
+        """Get the data for this sub-array as a numpy array. Wait for the data to arrive."""
         return self.get().result()
 
-    def set(self, value):
+    def set(self, value: np.ndarray) -> Future:
+        """Set the data for this sub-array using a numpy array. Returns a Future so the caller can know when the write is finished."""
         if not isinstance(value, np.ndarray):
             raise TypeError(
                 f"{self.__class__.__name__}.set() accepts only a numpy array."
@@ -157,12 +100,11 @@ class ZarrSubArray:
             )
 
         chunk_index_infos = self._chunk_index_infos
-        aggregate_future = Future()
+        aggregate_future = ZarrFuture(f"a[{self._index_repr}].set()")
         aggregator = Aggregator(aggregate_future, None)
 
         for chunk_index_info in chunk_index_infos:
-            chunk_index = tuple(i.chunk_index for i in chunk_index_info)
-            aggregator.add(chunk_index)
+            aggregator.add(chunk_index_info.chunk_index)
 
         for chunk_index_info in chunk_index_infos:
             _future = executor.submit(
@@ -177,7 +119,9 @@ class ZarrSubArray:
 
         return aggregate_future
 
-    def set_wait(self, value):
+    def set_wait(self, value: np.ndarray) -> None:
+        """Set the data for this sub-array using a numpy array, and wait for the write to finish."""
+        # TODO: _wait, _now, _sync ... make it consistent
         return self.set(value).result()
 
 
@@ -245,7 +189,7 @@ class ChunkIndexInfo:
     array_slices: tuple[slice, ...]  #: the n-dimensional slice to address in the array
 
 
-def normalize_selection(selection, shape):
+def normalize_selection(selection: tuple, shape: tuple[int, ...]) -> tuple:
     """Check types and dimensions, resolve ellipsis and slices."""
 
     ndim = len(shape)
@@ -274,6 +218,7 @@ def normalize_selection(selection, shape):
         )
 
     # More checks and resolve slices for None and negative values
+    # TODO: remove has_slices?
     has_slices = False
     for axis in range(ndim):
         index = selection[axis]
@@ -301,8 +246,24 @@ def normalize_selection(selection, shape):
     return tuple(selection), has_slices
 
 
+def get_selection_repr(normalized_selection: tuple, shape: tuple[int, ...]) -> str:
+    index_repr = []
+    for axis in range(len(normalized_selection)):
+        index = normalized_selection[axis]
+        if isinstance(index, int):
+            index_repr.append(str(index))
+        elif isinstance(index, slice):
+            x = f"{index.start if index.start > 0 else ''}:"
+            if index.stop < shape[axis]:
+                x += f"{index.stop}"
+            if index.step > 1:
+                x += f":{index.step}"
+            index_repr.append(x)
+    return ",".join(index_repr)
+
+
 def get_chunk_index_info_from_zarr_array_slice(
-    normalized_selection, shape, chunk_shape
+    normalized_selection: tuple, shape: tuple[int, ...], chunk_shape: tuple[int, ...]
 ) -> list[ChunkIndexInfo]:
     """Get per-chunk indexing info, based on array slices."""
 

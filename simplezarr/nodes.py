@@ -13,7 +13,7 @@ import numpy as np
 from .misc import executor
 from .stores import BaseStore, ReadableStore, WritableStore, ListableStore
 from .codecs import create_ndarray_type, encode_array, decode_bytes
-from .indexing import DataLoader, IndexConverter
+from .indexing import ZarrSubArray
 
 
 __all__ = [
@@ -277,24 +277,13 @@ class ZarrArray(ZarrNode):
     def chunks(self):
         return ChunkLoader(self)
 
-    @property
-    def index(self):
-        # todo: normalizer
-        return IndexConverter(self, return_future=True)
+    def __getitem__(self, selection) -> ZarrSubArray:
+        return ZarrSubArray(self, selection)
 
-    def __getitem__(self, selection):
-        # TODO: return a future with a sensible name and repr
-        return DataLoader(self, return_future=True)[selection]
-
-    def __setitem__(self, selection, value):
-        # TODO: rename dataloader
-        return DataLoader(self, return_future=True)[selection]
-
-    def get_data(self, selection) -> Future:
-        pass
-
-    def set_data(self, selection, value) -> Future:
-        pass
+    def __setitem__(self, *args):  # co-cover
+        raise RuntimeError(
+            "ZarrArray does not support index assignment (``a[..] = foo``), instead use ``a[..].set(foo)`` (which returns a future)."
+        )
 
     def get_chunk(self, index) -> np.ndarray:
         """Read a chunk from the store.
