@@ -36,62 +36,9 @@ class BaseIndexer:
         self._shape = zarr_array._shape
         self._grid_shape = zarr_array._chunk_grid_shape
 
-    def _normalize_selection(self, selection, shape):
-        """Check types and dimensions, resolve ellipsis and slices."""
-
-        ndim = len(shape)
-
-        # Make selection a list (mutable)
-        if not isinstance(selection, tuple):
-            selection = [selection]
-        else:
-            selection = list(selection)
-
-        # Resolve Ellipsis
-        has_ellipsis = selection.count(Ellipsis)
-        if has_ellipsis:
-            if has_ellipsis > 1:
-                raise IndexError(
-                    "Only one Ellipsis (...) allowed in indexing a Zarr array."
-                )
-            pos = selection.index(Ellipsis)
-            extra = [slice(None)] * (ndim - len(selection) + 1)
-            selection = [*selection[:pos], *extra, *selection[pos + 1 :]]
-
-        # Check selection
-        if len(selection) != ndim:
-            raise IndexError(
-                f"ZarrArray chunk indexing needs {ndim} indices, use ellipsis if necessary."
-            )
-
-        # More checks and resolve slices for None and negative values
-        has_slices = False
-        for axis in range(ndim):
-            index = selection[axis]
-            if isinstance(index, int):
-                pass
-            elif isinstance(index, slice):
-                if index.start is None:
-                    index = slice(0, index.stop, index.step)
-                elif index.start < 0:
-                    index = slice(shape[axis] + index.start, index.stop, index.step)
-                if index.stop is None:
-                    index = slice(index.start, shape[axis], index.step)
-                elif index.stop < 0:
-                    index = slice(index.start, shape[axis] + index.stop, index.step)
-                if index.step is None:
-                    index = slice(index.start, index.stop, 1)
-                selection[axis] = index
-            else:
-                raise IndexError(
-                    "ZarrArray chunk indexing needs the index of each dim to be int or slice"
-                )
-
-        return tuple(selection), has_slices
-
     def _get_chunk_ids_from_chunk_slice(self, selection):
         grid_shape = self._grid_shape
-        selection, has_slices = self._normalize_selection(selection, grid_shape)
+        selection, has_slices = normalize_selection(selection, grid_shape)
 
         if not has_slices:
             chunk_ids = [selection]
@@ -121,87 +68,6 @@ class BaseIndexer:
 
         return chunk_ids
 
-    def _get_chunk_index_info_from_zarr_array_slice(self, normalized_selection):
-        shape = self._shape
-        chunk_shape = self._array._chunk_shape
-
-        # We produce a list of chunk_sub_indexes
-        # Every chunk_sub_index is: (axis_info, ...)
-        # Every axis_ino is: (chunk_index_for_axis, i_start, i_end)
-
-        # TODO: refactor into a for-loop, to avoid recalculating the same info multiple times
-
-        def resolve(axis, axis_info_tuple, partial_selection):
-            # Get index for this axis. This index is for the zarr-array, and needs to be mapped to the chunk grid.
-            index, remaining_selection = partial_selection[0], partial_selection[1:]
-            if isinstance(index, int):
-                if index < 0:
-                    index = shape[axis] + index
-                chunk_index = index // chunk_shape[axis]
-                chunk_sub1 = index - chunk_index * chunk_shape[axis]
-                chunk_sub2 = chunk_sub1 + 1
-                array_sub1 = 0
-                array_sub2 = 1
-                axis_info = AxisInfo(
-                    chunk_index,
-                    chunk_sub1,
-                    chunk_sub2,
-                    array_sub1,
-                    array_sub2,
-                    step=None,
-                )
-                new_axis_info_tuple = (*axis_info_tuple, axis_info)
-                if remaining_selection:
-                    resolve(axis + 1, new_axis_info_tuple, remaining_selection)
-                else:
-                    chunk_index_infos.append(new_axis_info_tuple)
-            elif isinstance(index, slice):
-                # Prep calculations
-                first_chunk_index = index.start // chunk_shape[axis]
-                last_chunk_index = (index.stop - 1) // chunk_shape[axis]
-                array_offset = 0
-                # Iterate over (possible) chunks
-                for chunk_index in range(first_chunk_index, last_chunk_index + 1):
-                    # Establish chunk_sub1 and chunk_sub2
-                    zarray_index_for_chunk = chunk_index * chunk_shape[axis]
-                    chunk_sub1 = 0
-                    chunk_sub2 = chunk_shape[axis]
-                    if chunk_index == first_chunk_index:
-                        chunk_sub1 = index.start - zarray_index_for_chunk
-                    elif index.step > 1:
-                        zarray_offset = zarray_index_for_chunk - index.start
-                        zarray_offset = ceil(zarray_offset / index.step) * index.step
-                        zarrray_index = index.start + zarray_offset
-                        chunk_sub1 = zarrray_index - zarray_index_for_chunk
-                    if chunk_index == last_chunk_index:
-                        chunk_sub2 = index.stop - zarray_index_for_chunk
-                    if chunk_sub1 >= chunk_sub2:
-                        continue  # this chunk is skipped due to step size being larger than chunk size
-                    # Calculate indices for the target array
-                    array_sub1 = array_offset
-                    array_sub2 = array_offset + ceil(
-                        (chunk_sub2 - chunk_sub1) / index.step
-                    )
-                    array_offset = array_sub2
-                    axis_info = AxisInfo(
-                        chunk_index,
-                        chunk_sub1,
-                        chunk_sub2,
-                        array_sub1,
-                        array_sub2,
-                        step=index.step,
-                    )
-                    new_axis_info_tuple = (*axis_info_tuple, axis_info)
-                    if remaining_selection:
-                        resolve(axis + 1, new_axis_info_tuple, remaining_selection)
-                    else:
-                        chunk_index_infos.append(new_axis_info_tuple)
-
-        chunk_index_infos = []
-        resolve(0, (), normalized_selection)
-
-        return chunk_index_infos
-
 
 class BaseChunkIndexer(BaseIndexer):
     pass
@@ -210,10 +76,11 @@ class BaseChunkIndexer(BaseIndexer):
 class IndexConverter(BaseIndexer):
     def __getitem__(self, selection):
         shape = self._shape
-        normalized_selection, _has_slices = self._normalize_selection(selection, shape)
 
-        # chunk_index_infos = self._get_chunk_index_info_from_zarr_array_slice(
-        #     normalized_selection
+        normalized_selection, _has_slices = normalize_selection(selection, shape)
+
+        # chunk_index_infos = get_chunk_index_info_from_zarr_array_slice(
+        #     normalized_selection, self._shape. self._array._chunk_shape
         # )
         return normalized_selection
 
@@ -221,11 +88,12 @@ class IndexConverter(BaseIndexer):
 class DataLoader(BaseIndexer):
     def __getitem__(self, selection):
         shape = self._shape
+        chunk_shape = self._array._chunk_shape
 
-        normalized_selection, _has_slices = self._normalize_selection(selection, shape)
+        normalized_selection, _has_slices = normalize_selection(selection, shape)
 
-        chunk_index_infos = self._get_chunk_index_info_from_zarr_array_slice(
-            normalized_selection
+        chunk_index_infos = get_chunk_index_info_from_zarr_array_slice(
+            normalized_selection, shape, chunk_shape
         )
 
         return ZarrSubArray(self._array, normalized_selection, chunk_index_infos)
@@ -397,10 +265,134 @@ def write_chunk(zarr_array, aggregator, array, array_slices, chunk_index, chunk_
         aggregator.finish(chunk_index)
 
 
-class ChunkLoader(BaseChunkIndexer):
-    def __getitem__(self, selection):
-        chunk_ids = self._get_chunk_ids_from_chunk_slice(selection)
-        futures = []
-        for chunk_id in chunk_ids:
-            futures.append(self._array.get_chunk_future(*chunk_id))
-        return concurrent_gather(*futures)
+def normalize_selection(selection, shape):
+    """Check types and dimensions, resolve ellipsis and slices."""
+
+    ndim = len(shape)
+
+    # Make selection a list (mutable)
+    if not isinstance(selection, tuple):
+        selection = [selection]
+    else:
+        selection = list(selection)
+
+    # Resolve Ellipsis
+    has_ellipsis = selection.count(Ellipsis)
+    if has_ellipsis:
+        if has_ellipsis > 1:
+            raise IndexError(
+                "Only one Ellipsis (...) allowed in indexing a Zarr array."
+            )
+        pos = selection.index(Ellipsis)
+        extra = [slice(None)] * (ndim - len(selection) + 1)
+        selection = [*selection[:pos], *extra, *selection[pos + 1 :]]
+
+    # Check selection
+    if len(selection) != ndim:
+        raise IndexError(
+            f"ZarrArray chunk indexing needs {ndim} indices, use ellipsis if necessary."
+        )
+
+    # More checks and resolve slices for None and negative values
+    has_slices = False
+    for axis in range(ndim):
+        index = selection[axis]
+        if isinstance(index, int):
+            pass
+        elif isinstance(index, slice):
+            if index.start is None:
+                index = slice(0, index.stop, index.step)
+            elif index.start < 0:
+                index = slice(shape[axis] + index.start, index.stop, index.step)
+            if index.stop is None:
+                index = slice(index.start, shape[axis], index.step)
+            elif index.stop < 0:
+                index = slice(index.start, shape[axis] + index.stop, index.step)
+            if index.step is None:
+                index = slice(index.start, index.stop, 1)
+            selection[axis] = index
+        else:
+            raise IndexError(
+                "ZarrArray chunk indexing needs the index of each dim to be int or slice"
+            )
+
+    return tuple(selection), has_slices
+
+
+def get_chunk_index_info_from_zarr_array_slice(
+    normalized_selection, shape, chunk_shape
+) -> list[tuple[AxisInfo, ...]]:
+    """Get per-chunk indexing info, based on array slices."""
+
+    # We return a list. One element for each chunk. Each element is a tuple with ndim AxisInfo objects.
+
+    # TODO: refactor into a for-loop, to avoid recalculating the same info multiple times
+
+    def resolve(axis, axis_info_tuple, partial_selection):
+        # Get index for this axis. This index is for the zarr-array, and needs to be mapped to the chunk grid.
+        index, remaining_selection = partial_selection[0], partial_selection[1:]
+        if isinstance(index, int):
+            if index < 0:
+                index = shape[axis] + index
+            chunk_index = index // chunk_shape[axis]
+            chunk_sub1 = index - chunk_index * chunk_shape[axis]
+            chunk_sub2 = chunk_sub1 + 1
+            array_sub1 = 0
+            array_sub2 = 1
+            axis_info = AxisInfo(
+                chunk_index,
+                chunk_sub1,
+                chunk_sub2,
+                array_sub1,
+                array_sub2,
+                step=None,
+            )
+            new_axis_info_tuple = (*axis_info_tuple, axis_info)
+            if remaining_selection:
+                resolve(axis + 1, new_axis_info_tuple, remaining_selection)
+            else:
+                chunk_index_infos.append(new_axis_info_tuple)
+        elif isinstance(index, slice):
+            # Prep calculations
+            first_chunk_index = index.start // chunk_shape[axis]
+            last_chunk_index = (index.stop - 1) // chunk_shape[axis]
+            array_offset = 0
+            # Iterate over (possible) chunks
+            for chunk_index in range(first_chunk_index, last_chunk_index + 1):
+                # Establish chunk_sub1 and chunk_sub2
+                zarray_index_for_chunk = chunk_index * chunk_shape[axis]
+                chunk_sub1 = 0
+                chunk_sub2 = chunk_shape[axis]
+                if chunk_index == first_chunk_index:
+                    chunk_sub1 = index.start - zarray_index_for_chunk
+                elif index.step > 1:
+                    zarray_offset = zarray_index_for_chunk - index.start
+                    zarray_offset = ceil(zarray_offset / index.step) * index.step
+                    zarrray_index = index.start + zarray_offset
+                    chunk_sub1 = zarrray_index - zarray_index_for_chunk
+                if chunk_index == last_chunk_index:
+                    chunk_sub2 = index.stop - zarray_index_for_chunk
+                if chunk_sub1 >= chunk_sub2:
+                    continue  # this chunk is skipped due to step size being larger than chunk size
+                # Calculate indices for the target array
+                array_sub1 = array_offset
+                array_sub2 = array_offset + ceil((chunk_sub2 - chunk_sub1) / index.step)
+                array_offset = array_sub2
+                axis_info = AxisInfo(
+                    chunk_index,
+                    chunk_sub1,
+                    chunk_sub2,
+                    array_sub1,
+                    array_sub2,
+                    step=index.step,
+                )
+                new_axis_info_tuple = (*axis_info_tuple, axis_info)
+                if remaining_selection:
+                    resolve(axis + 1, new_axis_info_tuple, remaining_selection)
+                else:
+                    chunk_index_infos.append(new_axis_info_tuple)
+
+    chunk_index_infos = []
+    resolve(0, (), normalized_selection)
+
+    return chunk_index_infos
