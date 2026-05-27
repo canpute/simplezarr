@@ -6,13 +6,14 @@ from __future__ import annotations  # Using class names for types without Ruff F
 
 import json
 import math
-import atexit
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import Future
 
 import numpy as np
 
+from .misc import executor
 from .stores import BaseStore, ReadableStore, WritableStore, ListableStore
 from .codecs import create_ndarray_type, encode_array, decode_bytes
+from .indexing import DataLoader, IndexConverter
 
 
 __all__ = [
@@ -21,12 +22,6 @@ __all__ = [
     "ZarrGroup",
     "ZarrArray",
 ]
-
-
-# Create executor to allow parallel reads and writes
-# TODO: load it lazily, allow configuring number of workers
-executor = ThreadPoolExecutor(max_workers=8)
-atexit.register(lambda: executor.shutdown())
 
 
 def open_zarr(store: ReadableStore) -> ZarrNode:
@@ -277,6 +272,29 @@ class ZarrArray(ZarrNode):
     def chunk_nbytes(self) -> int:
         """The size of each chunk in (uncompressed) bytes."""
         return int(self.chunk_size * self._dtype_bits / 8)
+
+    @property
+    def chunks(self):
+        return ChunkLoader(self)
+
+    @property
+    def index(self):
+        # todo: normalizer
+        return IndexConverter(self, return_future=True)
+
+    def __getitem__(self, selection):
+        # TODO: return a future with a sensible name and repr
+        return DataLoader(self, return_future=True)[selection]
+
+    def __setitem__(self, selection, value):
+        # TODO: rename dataloader
+        return DataLoader(self, return_future=True)[selection]
+
+    def get_data(self, selection) -> Future:
+        pass
+
+    def set_data(self, selection, value) -> Future:
+        pass
 
     def get_chunk(self, index) -> np.ndarray:
         """Read a chunk from the store.
