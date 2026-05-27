@@ -1,6 +1,6 @@
 from math import ceil
 from dataclasses import dataclass
-from concurrent.futures import Future, wait as concurrent_gather
+from concurrent.futures import Future
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -10,23 +10,6 @@ from .misc import executor
 
 if TYPE_CHECKING:
     from .nodes import ZarrArray
-
-
-@dataclass(slots=True)
-class AxisInfo:
-    """Represents a partial chunk; a chunk which is sliced."""
-
-    chunk_index: int  #: the index of the chunk in the chunk grid
-    chunk_sub1: int  #: the start index of the slice from the chunk
-    chunk_sub2: int  #: the end index of the slice from the chunk
-    array_sub1: int  #: the start index in the array
-    array_sub2: int  #: the end index in the array
-    step: int | None  #: None means collapsed dim
-
-
-# class ChunkIndexInfo:
-#     axis_info: tuple[AxisInfo]
-#     future: object
 
 
 class BaseIndexer:
@@ -79,7 +62,7 @@ class IndexConverter(BaseIndexer):
 
         normalized_selection, _has_slices = normalize_selection(selection, shape)
 
-        # chunk_index_infos = get_chunk_index_info_from_zarr_array_slice(
+        # chunk_index_info_list = get_chunk_index_info_from_zarr_array_slice(
         #     normalized_selection, self._shape. self._array._chunk_shape
         # )
         return normalized_selection
@@ -137,30 +120,21 @@ class ZarrSubArray:
         array1 = np.empty(self._shape1, self._array.dtype)
         array2 = array1.reshape(self._shape2)
 
-        chunk_index_infos = self._chunk_index_infos
         aggregate_future = Future()
         aggregator = Aggregator(aggregate_future, array1)
 
         for chunk_index_info in chunk_index_infos:
-            chunk_index = tuple(i.chunk_index for i in chunk_index_info)
-            aggregator.add(chunk_index)
+            aggregator.add(chunk_index_info.chunk_index)
 
         for chunk_index_info in chunk_index_infos:
-            chunk_index = tuple(i.chunk_index for i in chunk_index_info)
-            array_slices = tuple(
-                slice(i.array_sub1, i.array_sub2) for i in chunk_index_info
-            )
-            chunk_slices = tuple(
-                slice(i.chunk_sub1, i.chunk_sub2, i.step) for i in chunk_index_info
-            )
             _future = executor.submit(
                 read_chunk,
                 self._array,
                 aggregator,
                 array2,
-                array_slices,
-                chunk_index,
-                chunk_slices,
+                chunk_index_info.array_slices,
+                chunk_index_info.chunk_index,
+                chunk_index_info.chunk_slices,
             )
 
         return aggregate_future
@@ -191,21 +165,14 @@ class ZarrSubArray:
             aggregator.add(chunk_index)
 
         for chunk_index_info in chunk_index_infos:
-            chunk_index = tuple(i.chunk_index for i in chunk_index_info)
-            array_slices = tuple(
-                slice(i.array_sub1, i.array_sub2) for i in chunk_index_info
-            )
-            chunk_slices = tuple(
-                slice(i.chunk_sub1, i.chunk_sub2, i.step) for i in chunk_index_info
-            )
             _future = executor.submit(
                 write_chunk,
                 self._array,
                 aggregator,
                 value,
-                array_slices,
-                chunk_index,
-                chunk_slices,
+                chunk_index_info.array_slices,
+                chunk_index_info.chunk_index,
+                chunk_index_info.chunk_slices,
             )
 
         return aggregate_future
@@ -215,6 +182,8 @@ class ZarrSubArray:
 
 
 class Aggregator:
+    """Helper to detect the finishing of multiple futures to finish the aggregate future."""
+
     def __init__(self, future: Future, result: object):
         self._future = future
         self._result = result
@@ -237,6 +206,7 @@ class Aggregator:
 
 
 def read_chunk(zarr_array, aggregator, array, array_slices, chunk_index, chunk_slices):
+    """Function to run in the exectutor to read a chunk."""
     try:
         data = zarr_array.get_chunk(chunk_index)
         array[*array_slices] = data[*chunk_slices]
@@ -247,6 +217,7 @@ def read_chunk(zarr_array, aggregator, array, array_slices, chunk_index, chunk_s
 
 
 def write_chunk(zarr_array, aggregator, array, array_slices, chunk_index, chunk_slices):
+    """Function to run in the exectutor to write a chunk."""
     try:
         is_full_chunk = (
             all(s.start == 0 for s in chunk_slices)
@@ -263,6 +234,15 @@ def write_chunk(zarr_array, aggregator, array, array_slices, chunk_index, chunk_
         aggregator.set_exception(err)
     else:
         aggregator.finish(chunk_index)
+
+
+@dataclass(slots=True)
+class ChunkIndexInfo:
+    """Represents a partial chunk; a chunk which is sliced, with corresponding indices in a target array."""
+
+    chunk_index: tuple[int, ...]  #: the index of the chunk in the chunk grid
+    chunk_slices: tuple[slice, ...]  #: the n-dimensional slice to address in the chunk
+    array_slices: tuple[slice, ...]  #: the n-dimensional slice to address in the array
 
 
 def normalize_selection(selection, shape):
@@ -298,7 +278,9 @@ def normalize_selection(selection, shape):
     for axis in range(ndim):
         index = selection[axis]
         if isinstance(index, int):
-            pass
+            if index < 0:
+                index = shape[axis] + index
+                selection[axis] = index
         elif isinstance(index, slice):
             if index.start is None:
                 index = slice(0, index.stop, index.step)
@@ -321,56 +303,53 @@ def normalize_selection(selection, shape):
 
 def get_chunk_index_info_from_zarr_array_slice(
     normalized_selection, shape, chunk_shape
-) -> list[tuple[AxisInfo, ...]]:
+) -> list[ChunkIndexInfo]:
     """Get per-chunk indexing info, based on array slices."""
 
-    # We return a list. One element for each chunk. Each element is a tuple with ndim AxisInfo objects.
+    ndim = len(shape)
+    assert ndim == len(chunk_shape)
 
-    # TODO: refactor into a for-loop, to avoid recalculating the same info multiple times
+    chunk_index_info_list_per_axis = {i: [] for i in range(ndim)}
+    chunk_index_info_list_per_axis[-1] = [ChunkIndexInfo((), (), ())]
 
-    def resolve(axis, axis_info_tuple, partial_selection):
-        # Get index for this axis. This index is for the zarr-array, and needs to be mapped to the chunk grid.
-        index, remaining_selection = partial_selection[0], partial_selection[1:]
-        if isinstance(index, int):
-            if index < 0:
-                index = shape[axis] + index
-            chunk_index = index // chunk_shape[axis]
-            chunk_sub1 = index - chunk_index * chunk_shape[axis]
-            chunk_sub2 = chunk_sub1 + 1
-            array_sub1 = 0
-            array_sub2 = 1
-            axis_info = AxisInfo(
-                chunk_index,
-                chunk_sub1,
-                chunk_sub2,
-                array_sub1,
-                array_sub2,
-                step=None,
+    def add_chunk_index_info(axis, chunk_int, chunk_slice, array_slice):
+        old_chunk_index_info_list = chunk_index_info_list_per_axis[axis - 1]
+        new_chunk_index_info_list = chunk_index_info_list_per_axis[axis]
+        for old_chunk_index_info in old_chunk_index_info_list:
+            new_chunk_index_info = ChunkIndexInfo(
+                chunk_index=(*old_chunk_index_info.chunk_index, chunk_int),
+                chunk_slices=(*old_chunk_index_info.chunk_slices, chunk_slice),
+                array_slices=(*old_chunk_index_info.array_slices, array_slice),
             )
-            new_axis_info_tuple = (*axis_info_tuple, axis_info)
-            if remaining_selection:
-                resolve(axis + 1, new_axis_info_tuple, remaining_selection)
-            else:
-                chunk_index_infos.append(new_axis_info_tuple)
+            new_chunk_index_info_list.append(new_chunk_index_info)
+
+    for axis in range(ndim):
+        index = normalized_selection[axis]
+        if isinstance(index, int):
+            chunk_int = index // chunk_shape[axis]
+            chunk_sub = index - chunk_int * chunk_shape[axis]
+            add_chunk_index_info(
+                axis, chunk_int, slice(chunk_sub, chunk_sub + 1, None), slice(0, 1)
+            )
         elif isinstance(index, slice):
             # Prep calculations
-            first_chunk_index = index.start // chunk_shape[axis]
-            last_chunk_index = (index.stop - 1) // chunk_shape[axis]
+            first_chunk_int = index.start // chunk_shape[axis]
+            last_chunk_int = (index.stop - 1) // chunk_shape[axis]
             array_offset = 0
             # Iterate over (possible) chunks
-            for chunk_index in range(first_chunk_index, last_chunk_index + 1):
+            for chunk_int in range(first_chunk_int, last_chunk_int + 1):
                 # Establish chunk_sub1 and chunk_sub2
-                zarray_index_for_chunk = chunk_index * chunk_shape[axis]
+                zarray_index_for_chunk = chunk_int * chunk_shape[axis]
                 chunk_sub1 = 0
                 chunk_sub2 = chunk_shape[axis]
-                if chunk_index == first_chunk_index:
+                if chunk_int == first_chunk_int:
                     chunk_sub1 = index.start - zarray_index_for_chunk
                 elif index.step > 1:
                     zarray_offset = zarray_index_for_chunk - index.start
                     zarray_offset = ceil(zarray_offset / index.step) * index.step
                     zarrray_index = index.start + zarray_offset
                     chunk_sub1 = zarrray_index - zarray_index_for_chunk
-                if chunk_index == last_chunk_index:
+                if chunk_int == last_chunk_int:
                     chunk_sub2 = index.stop - zarray_index_for_chunk
                 if chunk_sub1 >= chunk_sub2:
                     continue  # this chunk is skipped due to step size being larger than chunk size
@@ -378,21 +357,12 @@ def get_chunk_index_info_from_zarr_array_slice(
                 array_sub1 = array_offset
                 array_sub2 = array_offset + ceil((chunk_sub2 - chunk_sub1) / index.step)
                 array_offset = array_sub2
-                axis_info = AxisInfo(
-                    chunk_index,
-                    chunk_sub1,
-                    chunk_sub2,
-                    array_sub1,
-                    array_sub2,
-                    step=index.step,
+                add_chunk_index_info(
+                    axis,
+                    chunk_int,
+                    slice(chunk_sub1, chunk_sub2, index.step),
+                    slice(array_sub1, array_sub2),
                 )
-                new_axis_info_tuple = (*axis_info_tuple, axis_info)
-                if remaining_selection:
-                    resolve(axis + 1, new_axis_info_tuple, remaining_selection)
-                else:
-                    chunk_index_infos.append(new_axis_info_tuple)
 
-    chunk_index_infos = []
-    resolve(0, (), normalized_selection)
-
-    return chunk_index_infos
+    chunk_index_info_list = chunk_index_info_list_per_axis[ndim - 1]
+    return chunk_index_info_list

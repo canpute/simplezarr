@@ -156,7 +156,7 @@ def test_indexing_read_step():
 
     # Extra test to make sure chunks are not even loaded
     sub = arr[::19, :]
-    chunk_indices = {x[0].chunk_index for x in sub._chunk_index_infos}
+    chunk_indices = {x.chunk_index[0] for x in sub._chunk_index_infos}
     assert chunk_indices == {0, 1, 3}  # chunk 2 is never accessed
 
 
