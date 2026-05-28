@@ -376,6 +376,40 @@ def test_indexing_write2():
         arr[19:23, 11].set_wait(a)
 
 
+def test_chunk_selection():
+
+    store = MemoryStore(store_data.copy())
+    arr = open_zarr(store)
+    assert isinstance(arr, ZarrArray)
+
+    a = arr.chunks[0, 0].get_wait()
+    assert np.all(a == 100)
+
+    a = arr.chunks[-1, -1].get_wait()
+    assert np.all(a == 133)
+
+
+    # Test in the middle
+
+    sub = arr.chunks[1, 2]
+    a = sub.get_wait()
+    assert np.all(a == 112)
+
+    chunk_indices = [x.chunk_index for x in sub._chunk_index_infos]
+    assert chunk_indices == [(1, 2)]
+
+    # Slicing
+
+    sub = arr.chunks[1:3, 2:]
+
+    chunk_indices = [x.chunk_index for x in sub._chunk_index_infos]
+    assert chunk_indices == [(1, 2), (2, 2), (1, 3), (2, 3)]
+
+    # Cannot do steps, because the result is returned as one array
+    with pytest.raises(IndexError):
+        arr.chunks[0, ::2]
+
+
 if __name__ == "__main__":
     for func in list(globals().values()):
         if callable(func) and func.__name__.startswith("test_"):

@@ -15,6 +15,53 @@ if TYPE_CHECKING:
     from .nodes import ZarrArray
 
 
+class ChunkGridIndexer:
+    """Helper class to select a slice in the array using the chunk grid.
+
+    Usage::
+
+        # Select the 5th chunk vertically, and the 4th up to the 8th chunk horizontally.
+        sub = zarr_array.chunks[5, 4:8]
+
+        # Now get or set to get the numpy array
+        a = sub.get_wait()
+
+        # Short form
+        a = zarr_array.chunks[5, 4:8].get_wait()
+    """
+
+    def __init__(self, array: ZarrArray):
+        self._array = array
+
+    def __getitem__(self, selection) -> ZarrSubArray:
+        chunk_selection = normalize_selection(selection, self._array.chunk_grid_shape)
+        ndim = self._array.ndim
+        chunk_shape = self._array.chunk_shape
+
+        array_selection = []
+        for axis in range(ndim):
+            chunk_index = chunk_selection[axis]
+            if isinstance(chunk_index, int):
+                array_index = slice(
+                    chunk_index * chunk_shape[axis],
+                    (chunk_index + 1) * chunk_shape[axis],
+                    1,
+                )
+            else:
+                if chunk_index.step > 1:
+                    raise IndexError(
+                        "When indexing in the chunk grid, slices with steps are not allowed. Use multiple calls to zarr_array.get_chunk() instead."
+                    )
+                array_index = slice(
+                    chunk_index.start * chunk_shape[axis],
+                    chunk_index.stop * chunk_shape[axis],
+                    1,
+                )
+            array_selection.append(array_index)
+
+        return ZarrSubArray(self._array, tuple(array_selection))
+
+
 class ZarrSubArray:
     """A Zarr sub-array that can be used to get and set data."""
 
@@ -163,7 +210,7 @@ def read_chunk(zarr_array, aggregator, array, array_slices, chunk_index, chunk_s
 def write_chunk(
     zarr_array, aggregator, array_or_scalar, array_slices, chunk_index, chunk_slices
 ):
-    """Function to run in the exectutor to write a chunk."""
+    """Function to run in the executor to write a chunk."""
     try:
         is_full_chunk = (
             all(s.start == 0 for s in chunk_slices)

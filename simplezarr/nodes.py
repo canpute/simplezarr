@@ -13,7 +13,7 @@ import numpy as np
 from .misc import executor
 from .stores import BaseStore, ReadableStore, WritableStore, ListableStore
 from .codecs import create_ndarray_type, encode_array, decode_bytes
-from .indexing import ZarrSubArray
+from .indexing import ZarrSubArray, ChunkGridIndexer
 
 
 __all__ = [
@@ -275,7 +275,7 @@ class ZarrArray(ZarrNode):
 
     @property
     def chunks(self):
-        return ChunkLoader(self)
+        return ChunkGridIndexer(self)
 
     def __getitem__(self, selection) -> ZarrSubArray:
         return ZarrSubArray(self, selection)
