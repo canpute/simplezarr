@@ -34,6 +34,30 @@ We don't force asyncio. In fact, ``simplezarr`` does not even import
 asyncio (except in code paths that represent a utility specific to asyncio
 users).
 
+
+## Quick example
+
+```py
+
+    # Create a store
+    store = simplezarr.LocalStore(filename)
+
+    # Open as zarr
+    group = simplezarr.open_zarr(store)
+
+    # Navigate to array
+    array = group["foo/array"]
+
+    # Get a numpy array (blocking)
+    a = array[:200, :200].get_now()
+
+      # Load two regions in parallel
+    f1 = array[:200, :200].get_soon()
+    f2 = array[1000:1200, :200].get_soon()
+    a1, a2 = [f1.result(), f2.result()]
+```
+
+
 ## Comparison with zarr-python
 
 Why not use zarr-python? We ran into performance issues, and upon
