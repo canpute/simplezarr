@@ -322,7 +322,7 @@ class ChunkLocation:
 
         self._refs = set()
         self._data = None
-        self._future = scale_info.array.get_chunk_future(index)
+        self._future = scale_info.array.get_chunk_soon(index)
         self._nbytes = scale_info.array.chunk_nbytes
         self._load_handlers = {}
         self._drop_handlers = {}

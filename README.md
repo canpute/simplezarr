@@ -30,7 +30,7 @@ Zarr 3 is a great file format for large datasets. It's nice and elegant. The
 it as directly as possible.
 
 Parallelism is achieved using a thread-pool and `concurrent.futures.Future`
-objects. And in once place exactly: the code that reads a chunk (`ZarrArray.get_chunk_future()`).
+objects. And in once place exactly: the code that reads a chunk (`ZarrArray.get_chunk_soon()`).
 
 We don't force asyncio. In fact, ``simplezarr`` does not even import
 asyncio (except in code paths that represent a utility specific to asyncio
@@ -61,8 +61,8 @@ It looks like this complexity is one of the reasons why the performance of ome-z
 ### What simplezarr does
 
 * Stores are synchronous.
-* `simplezarr.Array.get_chunk()` is synchronous (no threading or async).
-* `simplezarr.Array.get_chunk_future()` uses a `ThreadPoolExecutor`. It returns a `concurrent.futures.Future`.
+* `simplezarr.Array.get_chunk_now()` is synchronous (no threading or async).
+* `simplezarr.Array.get_chunk_soon()` uses a `ThreadPoolExecutor`. It returns a `concurrent.futures.Future`.
 * This is enough to support concurrently reads.
 * No asyncio anywhere.
 * But can be used in `asyncio` (and other frameworks) using `await asyncio.wrap_future(f)` or `f.add_done_callback(call_soon_threadsafe)`.

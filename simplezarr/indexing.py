@@ -52,7 +52,7 @@ class ChunkGridIndexer:
             else:
                 if chunk_index.step > 1:
                     raise IndexError(
-                        "When indexing in the chunk grid, slices with steps are not allowed. Use multiple calls to zarr_array.get_chunk() instead."
+                        "When indexing in the chunk grid, slices with steps are not allowed. Use multiple calls to zarr_array.get_chunk_soon() instead."
                     )
                 array_index = slice(
                     chunk_index.start * chunk_shape[axis],
@@ -216,7 +216,7 @@ class Aggregator:
 def read_chunk(zarr_array, aggregator, array, array_slices, chunk_index, chunk_slices):
     """Function to run in the exectutor to read a chunk."""
     try:
-        data = zarr_array.get_chunk(chunk_index)
+        data = zarr_array.get_chunk_now(chunk_index)
         array[*array_slices] = data[*chunk_slices]
     except Exception as err:  # no-cover
         aggregator.set_exception(err)
@@ -243,9 +243,9 @@ def write_chunk(
         if is_full_chunk:
             data = sub_data
         else:
-            data = zarr_array.get_chunk(chunk_index).copy()
+            data = zarr_array.get_chunk_now(chunk_index).copy()
             data[*chunk_slices] = sub_data
-        zarr_array.set_chunk(chunk_index, data, check_empty=True)
+        zarr_array.set_chunk_now(chunk_index, data, check_empty=True)
     except Exception as err:
         aggregator.set_exception(err)
     else:
