@@ -12,15 +12,12 @@ use-cases. It supports parallel io, but does not force the use of asyncio.
 
 ## Status
 
+* Supports a sync API that does things in parallel when multiple chunks are involved.
+* Async API based on ``concurrent.futures.Future``.
 * Stores are implemented, (except no remote stores yet).
 * Codecs are implemented (all except for sharding).
-* Main API can (asynchronously) read and write chunks.
-
-What is not yet supported:
-
-* Writing Zarr files.
-* Indexing (wip).
-* Sharding.
+* Support for reading and writing individual chunks. Easy to parallelize.
+* Indexing to read and write regions (no support for index arrays yet).
 
 
 ## Motivation
@@ -30,7 +27,8 @@ Zarr 3 is a great file format for large datasets. It's nice and elegant. The
 it as directly as possible.
 
 Parallelism is achieved using a thread-pool and `concurrent.futures.Future`
-objects. And in once place exactly: the code that reads a chunk (`ZarrArray.get_chunk_soon()`).
+objects. Calls that return a `Future` have a `_soon` suffix. Calls that
+are blocking have a `_now` suffix.
 
 We don't force asyncio. In fact, ``simplezarr`` does not even import
 asyncio (except in code paths that represent a utility specific to asyncio
@@ -41,7 +39,7 @@ users).
 Why not use zarr-python? We ran into performance issues, and upon
 investigating what happens under the hood, we found it hard to follow the path
 that the code takes, especially regarding threading and asyncio. Granted, part
-of that complexity is because it must support older Zarr versions as well.
+of that complexity is because it must also support older Zarr versions.
 Another reason is that zarr-python does not seem to have a way to read individual blocks
 asynchronously (`AsyncArray.get_block_selection()` does not exist), which was a
 requirement for our use-case.
