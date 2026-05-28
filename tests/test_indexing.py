@@ -1,8 +1,10 @@
 from concurrent.futures import Future
 
 from simplezarr import MemoryStore, open_zarr, ZarrArray, ZarrSubArray
+from simplezarr.indexing import normalize_selection
 
 import numpy as np
+import pytest
 
 
 store_data = {
@@ -62,8 +64,12 @@ def test_indexing_read():
     # Read the whole array
     sub = arr[...]
     assert isinstance(sub, ZarrSubArray)
+    assert "a[:,:]" in repr(sub)
+    assert sub.array is arr
+    assert sub.shape == arr.shape
     f = sub.get()
     assert isinstance(f, Future)
+    assert "a[:,:].get()" in repr(f)
     a = sub.get_wait()
     assert isinstance(a, np.ndarray)
     assert a.shape == (40, 28)
@@ -74,7 +80,9 @@ def test_indexing_read():
     assert np.all(a == 100)
 
     # And another
-    a = arr[10:20, 14:21].get_wait()
+    sub = arr[10:20, 14:21]
+    a = sub.get_wait()
+    assert sub.shape == (10, 7)
     assert np.all(a == 112)
 
     # And another
@@ -87,7 +95,9 @@ def test_indexing_read():
     assert np.all(a == 112)
 
     # Read beyond boundaries
-    a = arr[8:12, 15:20].get_wait()
+    sub = arr[8:12, 15:20]
+    a = sub.get_wait()
+    assert sub.shape == (4, 5)
     assert a.shape == (4, 5)
     assert np.all(a[:2] == 102)
     assert np.all(a[2:] == 112)
@@ -106,11 +116,13 @@ def test_indexing_read_singleton():
     assert isinstance(arr, ZarrArray)
 
     # Scalar
+    assert arr[0, 0].shape == ()
     a = arr[0, 0].get_wait()
     assert a.shape == ()
     assert a == 100
 
     # One dimensional
+    assert arr[0, :].shape == (28,)
     a = arr[0, :].get_wait()
     assert a.shape == (28,)
     assert [int(i) for i in a][::7] == [100, 101, 102, 103]
@@ -166,7 +178,58 @@ def test_indexing_write():
     arr = open_zarr(store)
     assert isinstance(arr, ZarrArray)
 
+    # This is not allowed
+    with pytest.raises(IndexError):
+        arr[10:20, 7:14] = 7
+
     # Write an exact chunk
+    f = arr[10:20, 7:14].set(7)
+    assert isinstance(f, Future)
+    assert "a[10:20,7:14]" in repr(f)
+    f.result()  # wait
+
+    a = arr[10:20, 7:14].get_wait()
+    assert a.min() == 7
+    assert a.max() == 7
+
+    # Write accross chunks
+    arr[26:34, 18:26].set_wait(200)
+
+    a = arr[26:34, 18:26].get_wait()
+    assert a.min() == 200
+    assert a.max() == 200
+
+    # With steps
+    arr[26:34:2, 18:26:3].set_wait(202)
+
+    a = arr[26:34, 18:26].get_wait()
+    assert a.min() == 200
+    assert a.max() == 202
+
+    # Write row and scalar
+    arr[28, 19:25].set_wait(204)
+    arr[32, 22].set_wait(208)
+
+    a = arr[24:36, 16:28].get_wait()
+    ref = np.array(
+        [
+            # 16   17   18   19   20   21   22   23   24   25   26   27
+            [122, 122, 122, 122, 122, 123, 123, 123, 123, 123, 123, 123],  # 24
+            [122, 122, 122, 122, 122, 123, 123, 123, 123, 123, 123, 123],  # 25
+            [122, 122, 202, 200, 200, 202, 200, 200, 202, 200, 123, 123],  # 26
+            [122, 122, 200, 200, 200, 200, 200, 200, 200, 200, 123, 123],  # 27
+            [122, 122, 202, 204, 204, 204, 204, 204, 204, 200, 123, 123],  # 28
+            [122, 122, 200, 200, 200, 200, 200, 200, 200, 200, 123, 123],  # 29
+            [132, 132, 202, 200, 200, 202, 200, 200, 202, 200, 133, 133],  # 30
+            [132, 132, 200, 200, 200, 200, 200, 200, 200, 200, 133, 133],  # 31
+            [132, 132, 202, 200, 200, 202, 208, 200, 202, 200, 133, 133],  # 32
+            [132, 132, 200, 200, 200, 200, 200, 200, 200, 200, 133, 133],  # 33
+            [132, 132, 132, 132, 132, 133, 133, 133, 133, 133, 133, 133],  # 34
+            [132, 132, 132, 132, 132, 133, 133, 133, 133, 133, 133, 133],  # 35
+        ],
+        dtype=np.uint8,
+    )
+    assert np.all(a == ref)
 
 
 if __name__ == "__main__":

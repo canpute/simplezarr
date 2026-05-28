@@ -74,7 +74,7 @@ class ZarrNode:
         json_text = store.get(join(path, "zarr.json")).decode()
         metadata = json.loads(json_text)
 
-        if metadata["zarr_format"] != 3:
+        if metadata["zarr_format"] != 3:  # no-cover
             raise RuntimeError("Assuming Zarr version 3")
 
         node_type = metadata["node_type"]
@@ -82,7 +82,7 @@ class ZarrNode:
             return ZarrGroup(store, path, metadata=metadata)
         elif node_type == "array":
             return ZarrArray(store, path, metadata=metadata)
-        else:
+        else:  # no-cover
             raise RuntimeError(f"Unexpected node type {node_type!r}")
 
     @property
@@ -281,7 +281,7 @@ class ZarrArray(ZarrNode):
         return ZarrSubArray(self, selection)
 
     def __setitem__(self, *args):  # co-cover
-        raise RuntimeError(
+        raise IndexError(
             "ZarrArray does not support index assignment (``a[..] = foo``), instead use ``a[..].set(foo)`` (which returns a future)."
         )
 
@@ -357,7 +357,7 @@ class ZarrArray(ZarrNode):
         """
         return executor.submit(self.get_chunk, index)
 
-    def set_chunk(self, data, index, check_empty=True) -> None:
+    def set_chunk(self, index, data, check_empty=True) -> None:
         """Write a chunk to the store.
 
         Converts the index to the path for that chunk. Encodes the array
@@ -382,7 +382,9 @@ class ZarrArray(ZarrNode):
             )
 
         # Write (or erase) the chunk
-        path = self._path + "/c/" + self._chunk_separator.join(f"{x}" for x in index)
+        path = "c/" + self._chunk_separator.join(f"{x}" for x in index)
+        if self._path:
+            path = self._path + "/" + path
         if check_empty and np.all(data == self._fill_value):
             try:
                 self._store.erase(path)
@@ -392,7 +394,7 @@ class ZarrArray(ZarrNode):
             encoded_bytes = encode_array(data, self._codecs)
             self._store.set(path, encoded_bytes)
 
-    def set_chunk_future(self, data, index) -> Future[None]:
+    def set_chunk_future(self, index, data) -> Future[None]:
         """Write a chunk and return a ``concurrent.futures.Future``.
 
         The writing happens in a separate thread (using a ``ThreadPoolExecutor``).
@@ -428,7 +430,7 @@ class ZarrArray(ZarrNode):
             await asyncio.gather(*asyncio_futures)
 
         """
-        return executor.submit(self.set_chunk, data, index)
+        return executor.submit(self.set_chunk, index, data)
 
     def _parse_metadata(self):
         meta = self._metadata

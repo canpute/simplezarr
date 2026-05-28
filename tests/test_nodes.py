@@ -87,6 +87,7 @@ store_data = {
     "sub/array2/c/0/1": np.full((50, 50), 2.0, np.float32).tobytes(),
     "sub/array2/c/1/0": np.full((50, 50), 3.0, np.float32).tobytes(),
     "sub/array2/c/1/1": np.full((50, 50), 4.0, np.float32).tobytes(),
+    "foo/bar": b"extra dirs and files are ignored",
 }
 
 

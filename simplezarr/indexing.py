@@ -84,13 +84,15 @@ class ZarrSubArray:
         """Get the data for this sub-array as a numpy array. Wait for the data to arrive."""
         return self.get().result()
 
-    def set(self, value: np.ndarray) -> Future:
+    def set(self, value: float | np.ndarray) -> Future:
         """Set the data for this sub-array using a numpy array. Returns a Future so the caller can know when the write is finished."""
-        if not isinstance(value, np.ndarray):
+        if not isinstance(value, (int, float, np.ndarray)):
             raise TypeError(
                 f"{self.__class__.__name__}.set() accepts only a numpy array."
             )
-        if value.shape == self._shape1:
+        if isinstance(value, (int, float)):
+            pass  # ok
+        elif value.shape == self._shape1:
             pass  # ok
         elif value.shape == self._shape2:
             value = value.reshape(self._shape1)
@@ -160,18 +162,26 @@ def read_chunk(zarr_array, aggregator, array, array_slices, chunk_index, chunk_s
         aggregator.finish(chunk_index)
 
 
-def write_chunk(zarr_array, aggregator, array, array_slices, chunk_index, chunk_slices):
+def write_chunk(
+    zarr_array, aggregator, array_or_scalar, array_slices, chunk_index, chunk_slices
+):
     """Function to run in the exectutor to write a chunk."""
     try:
         is_full_chunk = (
             all(s.start == 0 for s in chunk_slices)
             and (s.stop for s in chunk_slices) == zarr_array._chunk_shape
         )
-        sub_data = array[*array_slices].astype(zarr_array._dtype, copy=False)
+        if isinstance(array_or_scalar, (float, int)):
+            sub_data = array_or_scalar
+            is_full_chunk = False
+        else:
+            sub_data = array_or_scalar[*array_slices].astype(
+                zarr_array._dtype, copy=False
+            )
         if is_full_chunk:
             data = sub_data
         else:
-            data = zarr_array.get_chunk(chunk_index)
+            data = zarr_array.get_chunk(chunk_index).copy()
             data[*chunk_slices] = sub_data
         zarr_array.set_chunk(chunk_index, data, check_empty=True)
     except Exception as err:
