@@ -115,7 +115,6 @@ def test_normalize_selection():
 
 
 def test_indexing_read():
-
     store = MemoryStore(store_data.copy())
     arr = open_zarr(store)
     assert isinstance(arr, ZarrArray)
@@ -126,101 +125,99 @@ def test_indexing_read():
     assert "a[:,:]" in repr(sub)
     assert sub.array is arr
     assert sub.shape == arr.shape
-    f = sub.get()
+    f = sub.get_soon()
     assert isinstance(f, Future)
-    assert "a[:,:].get()" in repr(f)
-    a = sub.get_wait()
+    assert "a[:,:].get_soon()" in repr(f)
+    a = sub.get_now()
     assert isinstance(a, np.ndarray)
     assert a.shape == (40, 28)
     assert int(a.max()) == 133
 
     # Read one whole chunk
-    a = arr[:10, :7].get_wait()
+    a = arr[:10, :7].get_now()
     assert np.all(a == 100)
 
     # And another
     sub = arr[10:20, 14:21]
-    a = sub.get_wait()
+    a = sub.get_now()
     assert sub.shape == (10, 7)
     assert np.all(a == 112)
 
     # And another
-    a = arr[30:, 14:21].get_wait()
+    a = arr[30:, 14:21].get_now()
     assert np.all(a == 132)
 
     # Read subchunk
-    a = arr[12:18, 15:20].get_wait()
+    a = arr[12:18, 15:20].get_now()
     assert a.shape == (6, 5)
     assert np.all(a == 112)
 
     # Read beyond boundaries
     sub = arr[8:12, 15:20]
-    a = sub.get_wait()
+    a = sub.get_now()
     assert sub.shape == (4, 5)
     assert a.shape == (4, 5)
     assert np.all(a[:2] == 102)
     assert np.all(a[2:] == 112)
 
     # Again
-    a = arr[:10, 19:23].get_wait()
+    a = arr[:10, 19:23].get_now()
     assert a.shape == (10, 4)
     assert np.all(a[:, :2] == 102)
     assert np.all(a[:, 2:] == 103)
 
 
 def test_indexing_read_singleton():
-
     store = MemoryStore(store_data.copy())
     arr = open_zarr(store)
     assert isinstance(arr, ZarrArray)
 
     # Scalar
     assert arr[0, 0].shape == ()
-    a = arr[0, 0].get_wait()
+    a = arr[0, 0].get_now()
     assert a.shape == ()
     assert a == 100
 
     # One dimensional
     assert arr[0, :].shape == (28,)
-    a = arr[0, :].get_wait()
+    a = arr[0, :].get_now()
     assert a.shape == (28,)
     assert [int(i) for i in a][::7] == [100, 101, 102, 103]
 
 
 def test_indexing_read_step():
-
     store = MemoryStore(store_data.copy())
     arr = open_zarr(store)
     assert isinstance(arr, ZarrArray)
 
     for i in range(7):
-        a = arr[0, i::7].get_wait()
+        a = arr[0, i::7].get_now()
         assert a.shape == (4,)
         assert list(a) == [100, 101, 102, 103]
 
     for i in range(10):
-        a = arr[i::10, 0].get_wait()
+        a = arr[i::10, 0].get_now()
         assert a.shape == (4,)
         assert list(a) == [100, 110, 120, 130]
 
     # Test with various step sizes
 
-    a0 = arr[:, 0].get_wait()
+    a0 = arr[:, 0].get_now()
     assert a0.shape == (40,)
 
     for step in range(1, 100):
-        a = arr[::step, 0].get_wait()
+        a = arr[::step, 0].get_now()
         ref = a0[::step]
         assert a.shape == ref.shape
         assert np.all(a == ref)
 
     # Test with various step sizes, in other dim
 
-    a0 = arr[0, :].get_wait()
+    a0 = arr[0, :].get_now()
     assert a0.shape == (28,)
 
     for step in range(1, 100):
-        a = arr[0, ::step].get_wait()
+        a = arr[0, ::step].get_now()
         ref = a0[::step]
         assert a.shape == ref.shape
         assert np.all(a == ref)
@@ -245,37 +242,37 @@ def test_indexing_write1():
     # This also fails
     sub = arr[10:20, 7:14]
     with pytest.raises(TypeError):
-        sub.set(None)
+        sub.set_soon(None)
 
     # Write an exact chunk
-    f = arr[10:20, 7:14].set(7)
+    f = arr[10:20, 7:14].set_soon(7)
     assert isinstance(f, Future)
     assert "a[10:20,7:14]" in repr(f)
     f.result()  # wait
 
-    a = arr[10:20, 7:14].get_wait()
+    a = arr[10:20, 7:14].get_now()
     assert a.min() == 7
     assert a.max() == 7
 
     # Write accross chunks
-    arr[26:34, 18:26].set_wait(200)
+    arr[26:34, 18:26].set_now(200)
 
-    a = arr[26:34, 18:26].get_wait()
+    a = arr[26:34, 18:26].get_now()
     assert a.min() == 200
     assert a.max() == 200
 
     # With steps
-    arr[26:34:2, 18:26:3].set_wait(202)
+    arr[26:34:2, 18:26:3].set_now(202)
 
-    a = arr[26:34, 18:26].get_wait()
+    a = arr[26:34, 18:26].get_now()
     assert a.min() == 200
     assert a.max() == 202
 
     # Write row and scalar
-    arr[28, 19:25].set_wait(204)
-    arr[32, 22].set_wait(208)
+    arr[28, 19:25].set_now(204)
+    arr[32, 22].set_now(208)
 
-    a = arr[24:36, 16:28].get_wait()
+    a = arr[24:36, 16:28].get_now()
     ref = np.array(
         [
             # 16   17   18   19   20   21   22   23   24   25   26   27
@@ -305,8 +302,8 @@ def test_indexing_write2():
     assert isinstance(arr, ZarrArray)
 
     # Write one exact chunk
-    arr[10:20, 7:14].set_wait(np.zeros((10, 7), np.uint8))
-    a = arr[10:20, 7:14].get_wait()
+    arr[10:20, 7:14].set_now(np.zeros((10, 7), np.uint8))
+    a = arr[10:20, 7:14].get_now()
     assert a.max() == 0
 
     # Define small patch
@@ -322,13 +319,13 @@ def test_indexing_write2():
     )
 
     # Write patch inside a chunk
-    arr[12:16, 8:12].set_wait(ref)
-    a = arr[12:16, 8:12].get_wait()
+    arr[12:16, 8:12].set_now(ref)
+    a = arr[12:16, 8:12].get_now()
     assert np.all(a == ref)
 
     # Write accross chunk
-    arr[19:23, 19:23].set_wait(ref)
-    a = arr[19:23, 19:23].get_wait()
+    arr[19:23, 19:23].set_now(ref)
+    a = arr[19:23, 19:23].get_now()
     assert np.all(a == ref)
 
     # One row ...
@@ -342,57 +339,55 @@ def test_indexing_write2():
 
     # Vertical
 
-    arr[19:23, 10].set_wait(ref0)
-    a = arr[19:23, 10].get_wait()
+    arr[19:23, 10].set_now(ref0)
+    a = arr[19:23, 10].get_now()
     assert np.all(a == ref0)
 
-    arr[19:23, 11].set_wait(ref1)
-    a = arr[19:23, 11].get_wait()
+    arr[19:23, 11].set_now(ref1)
+    a = arr[19:23, 11].get_now()
     assert np.all(a == ref0)
 
     # Horizontal
 
-    arr[7, 19:23].set_wait(ref0)
-    a = arr[7, 19:23].get_wait()
+    arr[7, 19:23].set_now(ref0)
+    a = arr[7, 19:23].get_now()
     assert np.all(a == ref0)
 
-    arr[8, 19:23].set_wait(ref2)
-    a = arr[8, 19:23].get_wait()
+    arr[8, 19:23].set_now(ref2)
+    a = arr[8, 19:23].get_now()
     assert np.all(a == ref0)
 
     # Fail
     with pytest.raises(IndexError):
-        arr[8, 19:23].set_wait(ref1)
+        arr[8, 19:23].set_now(ref1)
     with pytest.raises(IndexError):
-        arr[19:23, 11].set_wait(ref2)
+        arr[19:23, 11].set_now(ref2)
 
     # A fail triggered during chunk writing
 
     a = np.array(["a", "b", "c", "d"])
-    f = arr[19:23, 11].set(a)
+    f = arr[19:23, 11].set_soon(a)
     with pytest.raises(ValueError):
         f.result()
     with pytest.raises(ValueError):
-        arr[19:23, 11].set_wait(a)
+        arr[19:23, 11].set_now(a)
 
 
 def test_chunk_selection():
-
     store = MemoryStore(store_data.copy())
     arr = open_zarr(store)
     assert isinstance(arr, ZarrArray)
 
-    a = arr.chunks[0, 0].get_wait()
+    a = arr.chunks[0, 0].get_now()
     assert np.all(a == 100)
 
-    a = arr.chunks[-1, -1].get_wait()
+    a = arr.chunks[-1, -1].get_now()
     assert np.all(a == 133)
-
 
     # Test in the middle
 
     sub = arr.chunks[1, 2]
-    a = sub.get_wait()
+    a = sub.get_now()
     assert np.all(a == 112)
 
     chunk_indices = [x.chunk_index for x in sub._chunk_index_infos]

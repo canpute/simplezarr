@@ -2,6 +2,8 @@
 Implementation for Zarr array indexing.
 """
 
+from __future__ import annotations  # Using class names for types without Ruff F821
+
 from math import ceil
 from dataclasses import dataclass
 from concurrent.futures import Future
@@ -24,10 +26,10 @@ class ChunkGridIndexer:
         sub = zarr_array.chunks[5, 4:8]
 
         # Now get or set to get the numpy array
-        a = sub.get_wait()
+        a = sub.get_now()
 
         # Short form
-        a = zarr_array.chunks[5, 4:8].get_wait()
+        a = zarr_array.chunks[5, 4:8].get_now()
     """
 
     def __init__(self, array: ZarrArray):
@@ -101,14 +103,17 @@ class ZarrSubArray:
         """The shape of the sub array. Some dimensions can be collapsed, the array can even represent a scalar."""
         return self._shape1
 
-    def get(self) -> Future[np.ndarray]:
-        """Get the data for this sub-array as a numpy array. Returns a Future so the caller."""
+    def get_soon(self) -> Future[np.ndarray]:
+        """Get the data for this sub-array as a numpy array.
+
+        Returns a Future so the caller can wait for it in an appropriate way (e.g. wait for multiple gets in parallel).
+        """
         chunk_index_infos = self._chunk_index_infos
 
         array1 = np.empty(self._shape1, self._array.dtype)
         array2 = array1.reshape(self._shape2)
 
-        aggregate_future = ZarrFuture(f"a[{self._index_repr}].get()")
+        aggregate_future = ZarrFuture(f"a[{self._index_repr}].get_soon()")
         aggregator = Aggregator(aggregate_future, array1)
 
         for chunk_index_info in chunk_index_infos:
@@ -127,15 +132,24 @@ class ZarrSubArray:
 
         return aggregate_future
 
-    def get_wait(self) -> np.ndarray:
-        """Get the data for this sub-array as a numpy array. Wait for the data to arrive."""
-        return self.get().result()
+    def get_now(self) -> np.ndarray:
+        """Get the data for this sub-array as a numpy array.
 
-    def set(self, value: float | np.ndarray) -> Future:
-        """Set the data for this sub-array using a numpy array. Returns a Future so the caller can know when the write is finished."""
+        Blocks while waiting for the data to arrive. If the requested data
+        consists of multiple chunks, these chunks are loaded in parallel.
+        """
+        return self.get_soon().result()
+
+    def set_soon(self, value: float | np.ndarray) -> Future:
+        """Set the data for this sub-array using a numpy array.
+
+        Returns a Future so the caller can wait in an appropriate for the write to finish.
+        You could "fire and forget", but then you don't see any errors when the write fails.
+        If you are in an async framework, you can async wait for it so you do see the error.
+        """
         if not isinstance(value, (int, float, np.ndarray)):
             raise TypeError(
-                f"{self.__class__.__name__}.set() accepts only a numpy array."
+                f"{self.__class__.__name__}.set_soon() accepts only a numpy array."
             )
         if isinstance(value, np.ndarray):
             if value.shape == self._shape1:
@@ -144,10 +158,10 @@ class ZarrSubArray:
                 pass  # ok
             else:
                 raise IndexError(
-                    f"{self.__class__.__name__}.set() array has shape {value.shape} but expected {self._shape1} or {self._shape2}."
+                    f"{self.__class__.__name__}.set_soon() array has shape {value.shape} but expected {self._shape1} or {self._shape2}."
                 )
         chunk_index_infos = self._chunk_index_infos
-        aggregate_future = ZarrFuture(f"a[{self._index_repr}].set()")
+        aggregate_future = ZarrFuture(f"a[{self._index_repr}].set_soon()")
         aggregator = Aggregator(aggregate_future, None)
 
         for chunk_index_info in chunk_index_infos:
@@ -166,10 +180,13 @@ class ZarrSubArray:
 
         return aggregate_future
 
-    def set_wait(self, value: np.ndarray) -> None:
-        """Set the data for this sub-array using a numpy array, and wait for the write to finish."""
-        # TODO: _wait, _now, _sync ... make it consistent
-        return self.set(value).result()
+    def set_now(self, value: np.ndarray) -> None:
+        """Set the data for this sub-array using a numpy array.
+
+        Blocks while waiting for the write to finish. If the written data covers
+        multiple chunks, these chunks are written in parallel.
+        """
+        return self.set_soon(value).result()
 
 
 class Aggregator:

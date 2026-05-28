@@ -282,7 +282,7 @@ class ZarrArray(ZarrNode):
 
     def __setitem__(self, *args):  # co-cover
         raise IndexError(
-            "ZarrArray does not support index assignment (``a[..] = foo``), instead use ``a[..].set(foo)`` (which returns a future)."
+            "ZarrArray does not support index assignment (``a[..] = foo``), instead use ``a[..].set_now(foo)`` or ``a[..].set_soon(foo)``."
         )
 
     def get_chunk(self, index) -> np.ndarray:
