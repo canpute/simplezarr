@@ -55,6 +55,65 @@ store_data = {
 }
 
 
+def test_normalize_selection():
+    shape = (100, 120)
+
+    # Full size
+
+    s = normalize_selection((...), shape)
+    assert s == (slice(0, 100, 1), slice(0, 120, 1))
+
+    s = normalize_selection((slice(None), slice(None)), shape)
+    assert s == (slice(0, 100, 1), slice(0, 120, 1))
+
+    # Open ended
+
+    s = normalize_selection((slice(20), slice(100, None)), shape)
+    assert s == (slice(0, 20, 1), slice(100, 120, 1))
+
+    # Negative
+
+    s = normalize_selection((slice(-20), slice(-100, None)), shape)
+    assert s == (slice(0, 80, 1), slice(20, 120, 1))
+
+    s = normalize_selection((slice(-40, -20), slice(-20, -40)), shape)
+    assert s == (slice(60, 80, 1), slice(100, 100, 1))
+
+    # Ints
+
+    s = normalize_selection((3, 4), shape)
+    assert s == (3, 4)
+
+    s = normalize_selection((-3, -4), shape)
+    assert s == (97, 116)
+
+    # Steps
+
+    s = normalize_selection((slice(None, None, 2), slice(10, 80, 3)), shape)
+    assert s == (slice(0, 100, 2), slice(10, 80, 3))
+
+    # Fails
+
+    with pytest.raises(IndexError):  # No floats
+        normalize_selection((0, 1.2), shape)
+    with pytest.raises(IndexError):  # No floats
+        normalize_selection((0, slice(1.2)), shape)
+    with pytest.raises(IndexError):  # only one ellipsis
+        normalize_selection((..., ...), shape)
+    with pytest.raises(IndexError):  # ndim mismatch
+        normalize_selection((3,), shape)
+    with pytest.raises(IndexError):  # ndim mismatch
+        normalize_selection((3, 4, 5), shape)
+    with pytest.raises(IndexError):  # step cannot be zero
+        normalize_selection((0, slice(0, 100, 0)), shape)
+    with pytest.raises(IndexError):  # step cannot be neg
+        normalize_selection((0, slice(0, 100, -1)), shape)
+    with pytest.raises(IndexError):  # int index out of range
+        normalize_selection((0, 1000), shape)
+    with pytest.raises(IndexError):  # int index out of range
+        normalize_selection((0, -1000), shape)
+
+
 def test_indexing_read():
 
     store = MemoryStore(store_data.copy())
@@ -172,7 +231,8 @@ def test_indexing_read_step():
     assert chunk_indices == {0, 1, 3}  # chunk 2 is never accessed
 
 
-def test_indexing_write():
+def test_indexing_write1():
+    # Test writing scalars
 
     store = MemoryStore(store_data.copy())
     arr = open_zarr(store)
@@ -181,6 +241,11 @@ def test_indexing_write():
     # This is not allowed
     with pytest.raises(IndexError):
         arr[10:20, 7:14] = 7
+
+    # This also fails
+    sub = arr[10:20, 7:14]
+    with pytest.raises(TypeError):
+        sub.set(None)
 
     # Write an exact chunk
     f = arr[10:20, 7:14].set(7)
@@ -230,6 +295,85 @@ def test_indexing_write():
         dtype=np.uint8,
     )
     assert np.all(a == ref)
+
+
+def test_indexing_write2():
+    # Test writing arrays
+
+    store = MemoryStore(store_data.copy())
+    arr = open_zarr(store)
+    assert isinstance(arr, ZarrArray)
+
+    # Write one exact chunk
+    arr[10:20, 7:14].set_wait(np.zeros((10, 7), np.uint8))
+    a = arr[10:20, 7:14].get_wait()
+    assert a.max() == 0
+
+    # Define small patch
+
+    ref = np.array(
+        [
+            [200, 204, 207, 210],
+            [201, 205, 208, 211],
+            [203, 206, 209, 212],
+            [220, 221, 222, 223],
+        ],
+        dtype=np.uint8,
+    )
+
+    # Write patch inside a chunk
+    arr[12:16, 8:12].set_wait(ref)
+    a = arr[12:16, 8:12].get_wait()
+    assert np.all(a == ref)
+
+    # Write accross chunk
+    arr[19:23, 19:23].set_wait(ref)
+    a = arr[19:23, 19:23].get_wait()
+    assert np.all(a == ref)
+
+    # One row ...
+
+    ref0 = np.array(
+        [230, 231, 232, 233],
+        dtype=np.uint8,
+    )
+    ref1 = ref0.reshape(4, 1)
+    ref2 = ref0.reshape(1, 4)
+
+    # Vertical
+
+    arr[19:23, 10].set_wait(ref0)
+    a = arr[19:23, 10].get_wait()
+    assert np.all(a == ref0)
+
+    arr[19:23, 11].set_wait(ref1)
+    a = arr[19:23, 11].get_wait()
+    assert np.all(a == ref0)
+
+    # Horizontal
+
+    arr[7, 19:23].set_wait(ref0)
+    a = arr[7, 19:23].get_wait()
+    assert np.all(a == ref0)
+
+    arr[8, 19:23].set_wait(ref2)
+    a = arr[8, 19:23].get_wait()
+    assert np.all(a == ref0)
+
+    # Fail
+    with pytest.raises(IndexError):
+        arr[8, 19:23].set_wait(ref1)
+    with pytest.raises(IndexError):
+        arr[19:23, 11].set_wait(ref2)
+
+    # A fail triggered during chunk writing
+
+    a = np.array(["a", "b", "c", "d"])
+    f = arr[19:23, 11].set(a)
+    with pytest.raises(ValueError):
+        f.result()
+    with pytest.raises(ValueError):
+        arr[19:23, 11].set_wait(a)
 
 
 if __name__ == "__main__":

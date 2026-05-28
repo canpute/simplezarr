@@ -22,7 +22,7 @@ class ZarrSubArray:
         self._array = array
         shape = array._shape
 
-        normalized_selection, _has_slices = normalize_selection(selection, shape)
+        normalized_selection = normalize_selection(selection, shape)
         self._index_repr = get_selection_repr(normalized_selection, shape)
         self._chunk_index_infos = get_chunk_index_info_from_zarr_array_slice(
             normalized_selection, shape, array._chunk_shape
@@ -90,17 +90,15 @@ class ZarrSubArray:
             raise TypeError(
                 f"{self.__class__.__name__}.set() accepts only a numpy array."
             )
-        if isinstance(value, (int, float)):
-            pass  # ok
-        elif value.shape == self._shape1:
-            pass  # ok
-        elif value.shape == self._shape2:
-            value = value.reshape(self._shape1)
-        else:
-            raise ValueError(
-                f"{self.__class__.__name__}.set() array has shape {value.shape} but expected {self._shape1} or {self._shape2}."
-            )
-
+        if isinstance(value, np.ndarray):
+            if value.shape == self._shape1:
+                value = value.reshape(self._shape2)
+            elif value.shape == self._shape2:
+                pass  # ok
+            else:
+                raise IndexError(
+                    f"{self.__class__.__name__}.set() array has shape {value.shape} but expected {self._shape1} or {self._shape2}."
+                )
         chunk_index_infos = self._chunk_index_infos
         aggregate_future = ZarrFuture(f"a[{self._index_repr}].set()")
         aggregator = Aggregator(aggregate_future, None)
@@ -156,7 +154,7 @@ def read_chunk(zarr_array, aggregator, array, array_slices, chunk_index, chunk_s
     try:
         data = zarr_array.get_chunk(chunk_index)
         array[*array_slices] = data[*chunk_slices]
-    except Exception as err:
+    except Exception as err:  # no-cover
         aggregator.set_exception(err)
     else:
         aggregator.finish(chunk_index)
@@ -169,7 +167,7 @@ def write_chunk(
     try:
         is_full_chunk = (
             all(s.start == 0 for s in chunk_slices)
-            and (s.stop for s in chunk_slices) == zarr_array._chunk_shape
+            and tuple(s.stop for s in chunk_slices) == zarr_array._chunk_shape
         )
         if isinstance(array_or_scalar, (float, int)):
             sub_data = array_or_scalar
@@ -228,8 +226,6 @@ def normalize_selection(selection: tuple, shape: tuple[int, ...]) -> tuple:
         )
 
     # More checks and resolve slices for None and negative values
-    # TODO: remove has_slices?
-    has_slices = False
     for axis in range(ndim):
         index = selection[axis]
         if isinstance(index, int):
@@ -237,23 +233,46 @@ def normalize_selection(selection: tuple, shape: tuple[int, ...]) -> tuple:
                 index = shape[axis] + index
                 selection[axis] = index
         elif isinstance(index, slice):
-            if index.start is None:
-                index = slice(0, index.stop, index.step)
-            elif index.start < 0:
-                index = slice(shape[axis] + index.start, index.stop, index.step)
-            if index.stop is None:
-                index = slice(index.start, shape[axis], index.step)
-            elif index.stop < 0:
-                index = slice(index.start, shape[axis] + index.stop, index.step)
-            if index.step is None:
-                index = slice(index.start, index.stop, 1)
-            selection[axis] = index
+            start = index.start
+            stop = index.stop
+            step = index.step
+            if start is None:
+                start = 0
+            if stop is None:
+                stop = shape[axis]
+            if step is None:
+                step = 1
+            if not (
+                isinstance(start, int)
+                and isinstance(stop, int)
+                and isinstance(step, int)
+            ):
+                raise IndexError("Index slice must consist only of ints.")
+            if start < 0:
+                start = max(0, shape[axis] + start)
+            else:
+                start = min(shape[axis], start)
+            if stop < 0:
+                stop = shape[axis] + stop
+            stop = max(start, stop)
+            if step <= 0:
+                raise IndexError(f"Index slice step must one or higher, got {step}")
+            selection[axis] = slice(start, stop, step)
         else:
             raise IndexError(
                 "ZarrArray chunk indexing needs the index of each dim to be int or slice"
             )
 
-    return tuple(selection), has_slices
+    # Bounds check
+    for axis in range(ndim):
+        index = selection[axis]
+        if isinstance(index, int):
+            if index < 0 or index > shape[axis]:
+                raise IndexError(
+                    f"Index out of bounds: {get_selection_repr(selection, shape)}"
+                )
+
+    return tuple(selection)
 
 
 def get_selection_repr(normalized_selection: tuple, shape: tuple[int, ...]) -> str:
