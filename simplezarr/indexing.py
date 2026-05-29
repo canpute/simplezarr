@@ -318,6 +318,8 @@ def normalize_selection(selection: tuple, shape: tuple[int, ...]) -> tuple:
                 start = min(shape[axis], start)
             if stop < 0:
                 stop = shape[axis] + stop
+            else:
+                stop = min(shape[axis], stop)
             stop = max(start, stop)
             if step <= 0:
                 raise IndexError(f"Index slice step must one or higher, got {step}")

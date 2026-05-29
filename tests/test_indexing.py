@@ -79,6 +79,17 @@ def test_normalize_selection():
     s = normalize_selection((slice(-40, -20), slice(-20, -40)), shape)
     assert s == (slice(60, 80, 1), slice(100, 100, 1))
 
+    # Bounds
+
+    s = normalize_selection((slice(-200, None), slice(-200)), shape)
+    assert s == (slice(0, 100, 1), slice(0, 0, 1))
+
+    s = normalize_selection((slice(50, 40), slice(50, -100)), shape)
+    assert s == (slice(50, 50, 1), slice(50, 50, 1))
+
+    s = normalize_selection((slice(0, 200), slice(200, 100)), shape)
+    assert s == (slice(0, 100, 1), slice(120, 120, 1))
+
     # Ints
 
     s = normalize_selection((3, 4), shape)
