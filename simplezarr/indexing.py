@@ -17,6 +17,9 @@ if TYPE_CHECKING:
     from .nodes import ZarrArray
 
 
+__all__ = ["ZarrArraySlice"]
+
+
 class ChunkGridIndexer:
     """Helper class to select a slice in the array using the chunk grid.
 
@@ -65,7 +68,20 @@ class ChunkGridIndexer:
 
 
 class ZarrArraySlice:
-    """A slice of a ZarrArray that can be used to get and set data."""
+    """A slice of a ZarrArray that can be used to get and set data.
+
+    Usage::
+
+        # Select the 5th row vertically, and the first 100 columns horizontally
+        sub = zarr_array[5, :100]
+
+        # Now get or set to get the numpy array
+        a = sub.get_now()
+
+        # Short form
+        a = zarr_array[5, :100].get_now()
+
+    """
 
     def __init__(self, array: ZarrArray, selection: tuple):
         self._array = array

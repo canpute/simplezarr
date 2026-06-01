@@ -275,9 +275,30 @@ class ZarrArray(ZarrNode):
 
     @property
     def chunks(self):
+        """Select a contiguous set of chunks.
+
+        Similar to ``__getitem__``, but the indices are coordinates in the chunk grid.
+
+        Example::
+
+            arr.chunks[0, 0]  # Select array for the first chunk
+            arr.chunks[0, :]  # Select array for first row of chunks
+        """
         return ChunkGridIndexer(self)
 
     def __getitem__(self, selection) -> ZarrArraySlice:
+        """Select a slice from the array.
+
+        The returned ``ZarrArraySlice`` can be used to get and set the actual data.
+
+        Examples::
+
+            # The lines below assume ndim=2 for sake of simplicity
+            arr[...]  # select the whole array
+            arr[0, :]  # select one row
+            arr[:10, 100:800:5]  # Slice, optionally with steps
+            arr[10, 10]  # select a scalar
+        """
         return ZarrArraySlice(self, selection)
 
     def __setitem__(self, *args):  # co-cover
