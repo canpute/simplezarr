@@ -35,7 +35,7 @@ class ChunkGridIndexer:
     def __init__(self, array: ZarrArray):
         self._array = array
 
-    def __getitem__(self, selection) -> ZarrSubArray:
+    def __getitem__(self, selection) -> ZarrArraySlice:
         chunk_selection = normalize_selection(selection, self._array.chunk_grid_shape)
         ndim = self._array.ndim
         chunk_shape = self._array.chunk_shape
@@ -61,11 +61,11 @@ class ChunkGridIndexer:
                 )
             array_selection.append(array_index)
 
-        return ZarrSubArray(self._array, tuple(array_selection))
+        return ZarrArraySlice(self._array, tuple(array_selection))
 
 
-class ZarrSubArray:
-    """A Zarr sub-array that can be used to get and set data."""
+class ZarrArraySlice:
+    """A slice of a ZarrArray that can be used to get and set data."""
 
     def __init__(self, array: ZarrArray, selection: tuple):
         self._array = array
@@ -104,7 +104,7 @@ class ZarrSubArray:
         return self._shape1
 
     def get_soon(self) -> Future[np.ndarray]:
-        """Get the data for this sub-array as a numpy array.
+        """Get the data for this ZarrArraySlice as a numpy array.
 
         Returns a Future so the caller can wait for it in an appropriate way (e.g. wait for multiple gets in parallel).
         """
@@ -133,7 +133,7 @@ class ZarrSubArray:
         return aggregate_future
 
     def get_now(self) -> np.ndarray:
-        """Get the data for this sub-array as a numpy array.
+        """Get the data for this ZarrArraySlice as a numpy array.
 
         Blocks while waiting for the data to arrive. If the requested data
         consists of multiple chunks, these chunks are loaded in parallel.
@@ -141,7 +141,7 @@ class ZarrSubArray:
         return self.get_soon().result()
 
     def set_soon(self, value: float | np.ndarray) -> Future:
-        """Set the data for this sub-array using a numpy array.
+        """Set the data for this ZarrArraySlice using a numpy array.
 
         Returns a Future so the caller can wait in an appropriate for the write to finish.
         You could "fire and forget", but then you don't see any errors when the write fails.
@@ -181,7 +181,7 @@ class ZarrSubArray:
         return aggregate_future
 
     def set_now(self, value: np.ndarray) -> None:
-        """Set the data for this sub-array using a numpy array.
+        """Set the data for this ZarrArraySlice using a numpy array.
 
         Blocks while waiting for the write to finish. If the written data covers
         multiple chunks, these chunks are written in parallel.
@@ -276,9 +276,7 @@ def normalize_selection(selection: tuple, shape: tuple[int, ...]) -> tuple:
     has_ellipsis = selection.count(Ellipsis)
     if has_ellipsis:
         if has_ellipsis > 1:
-            raise IndexError(
-                "Only one Ellipsis (...) allowed in indexing a Zarr array."
-            )
+            raise IndexError("Only one Ellipsis (...) allowed in indexing a ZarrArray.")
         pos = selection.index(Ellipsis)
         extra = [slice(None)] * (ndim - len(selection) + 1)
         selection = [*selection[:pos], *extra, *selection[pos + 1 :]]

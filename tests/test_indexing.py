@@ -1,6 +1,6 @@
 from concurrent.futures import Future
 
-from simplezarr import MemoryStore, open_zarr, ZarrArray, ZarrSubArray
+from simplezarr import MemoryStore, open_zarr, ZarrArray, ZarrArraySlice
 from simplezarr.indexing import normalize_selection
 
 import numpy as np
@@ -132,7 +132,7 @@ def test_indexing_read():
 
     # Read the whole array
     sub = arr[...]
-    assert isinstance(sub, ZarrSubArray)
+    assert isinstance(sub, ZarrArraySlice)
     assert "a[:,:]" in repr(sub)
     assert sub.array is arr
     assert sub.shape == arr.shape

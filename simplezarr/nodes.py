@@ -13,7 +13,7 @@ import numpy as np
 from .misc import executor
 from .stores import BaseStore, ReadableStore, WritableStore, ListableStore
 from .codecs import create_ndarray_type, encode_array, decode_bytes
-from .indexing import ZarrSubArray, ChunkGridIndexer
+from .indexing import ZarrArraySlice, ChunkGridIndexer
 
 
 __all__ = [
@@ -277,8 +277,8 @@ class ZarrArray(ZarrNode):
     def chunks(self):
         return ChunkGridIndexer(self)
 
-    def __getitem__(self, selection) -> ZarrSubArray:
-        return ZarrSubArray(self, selection)
+    def __getitem__(self, selection) -> ZarrArraySlice:
+        return ZarrArraySlice(self, selection)
 
     def __setitem__(self, *args):  # co-cover
         raise IndexError(
