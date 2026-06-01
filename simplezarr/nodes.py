@@ -6,13 +6,14 @@ from __future__ import annotations  # Using class names for types without Ruff F
 
 import json
 import math
-import atexit
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import Future
 
 import numpy as np
 
+from .misc import executor
 from .stores import BaseStore, ReadableStore, WritableStore, ListableStore
 from .codecs import create_ndarray_type, encode_array, decode_bytes
+from .indexing import ZarrArraySlice, ChunkGridIndexer
 
 
 __all__ = [
@@ -21,12 +22,6 @@ __all__ = [
     "ZarrGroup",
     "ZarrArray",
 ]
-
-
-# Create executor to allow parallel reads and writes
-# TODO: load it lazily, allow configuring number of workers
-executor = ThreadPoolExecutor(max_workers=8)
-atexit.register(lambda: executor.shutdown())
 
 
 def open_zarr(store: ReadableStore) -> ZarrNode:
@@ -79,7 +74,7 @@ class ZarrNode:
         json_text = store.get(join(path, "zarr.json")).decode()
         metadata = json.loads(json_text)
 
-        if metadata["zarr_format"] != 3:
+        if metadata["zarr_format"] != 3:  # no-cover
             raise RuntimeError("Assuming Zarr version 3")
 
         node_type = metadata["node_type"]
@@ -87,7 +82,7 @@ class ZarrNode:
             return ZarrGroup(store, path, metadata=metadata)
         elif node_type == "array":
             return ZarrArray(store, path, metadata=metadata)
-        else:
+        else:  # no-cover
             raise RuntimeError(f"Unexpected node type {node_type!r}")
 
     @property
@@ -278,10 +273,43 @@ class ZarrArray(ZarrNode):
         """The size of each chunk in (uncompressed) bytes."""
         return int(self.chunk_size * self._dtype_bits / 8)
 
-    def get_chunk(self, index) -> np.ndarray:
+    @property
+    def chunks(self):
+        """Select a contiguous set of chunks.
+
+        Similar to ``__getitem__``, but the indices are coordinates in the chunk grid.
+
+        Example::
+
+            arr.chunks[0, 0]  # Select array for the first chunk
+            arr.chunks[0, :]  # Select array for first row of chunks
+        """
+        return ChunkGridIndexer(self)
+
+    def __getitem__(self, selection) -> ZarrArraySlice:
+        """Select a slice from the array.
+
+        The returned ``ZarrArraySlice`` can be used to get and set the actual data.
+
+        Examples::
+
+            # The lines below assume ndim=2 for sake of simplicity
+            arr[...]  # select the whole array
+            arr[0, :]  # select one row
+            arr[:10, 100:800:5]  # Slice, optionally with steps
+            arr[10, 10]  # select a scalar
+        """
+        return ZarrArraySlice(self, selection)
+
+    def __setitem__(self, *args):  # co-cover
+        raise IndexError(
+            "ZarrArray does not support index assignment (``a[..] = foo``), instead use ``a[..].set_now(foo)`` or ``a[..].set_soon(foo)``."
+        )
+
+    def get_chunk_now(self, index) -> np.ndarray:
         """Read a chunk from the store.
 
-        This function is synchronous; you may want to use ``get_chunk_future()``
+        This function is synchronous; you may want to use ``get_chunk_soon()``
         to do the loading and decompression in a separate thread.
 
         Converts the index to the path for that chunk, load the bytes
@@ -292,11 +320,15 @@ class ZarrArray(ZarrNode):
 
         # Check index
         if not isinstance(index, tuple):
-            raise TypeError(f"ZarrArray.get_chunk() needs a tuple index, got {index!r}")
+            raise TypeError(
+                f"ZarrArray.get_chunk_now() needs a tuple index, got {index!r}"
+            )
         if len(index) != len(self._shape):
-            raise IndexError(f"ZarrArray.get_chunk() needs {len(self._shape)} indices.")
+            raise IndexError(
+                f"ZarrArray.get_chunk_now() needs {len(self._shape)} indices."
+            )
         if not all(isinstance(i, int) for i in index):
-            raise ValueError("ZarrArray.get_chunk() needs integer indices.")
+            raise ValueError("ZarrArray.get_chunk_now() needs integer indices.")
 
         # Load data. This could take a while if it's a remote/slow store
         path = "c/" + self._chunk_separator.join(f"{x}" for x in index)
@@ -311,10 +343,10 @@ class ZarrArray(ZarrNode):
         array_type = create_ndarray_type(self._chunk_shape, self._dtype)
         return decode_bytes(memoryview(encoded_bytes), self._codecs, array_type)
 
-    def get_chunk_future(self, index) -> Future[np.ndarray]:
+    def get_chunk_soon(self, index) -> Future[np.ndarray]:
         """Read a chunk and return a ``concurrent.futures.Future``.
 
-        The loading happens in a separate thread (using a ``ThreadPoolExecutor``).
+        Calls ``get_chunk_now()`` in a separate thread (using a ``ThreadPoolExecutor``).
         One can wait for the result, and also combine multiple reads in parallel.
 
         This has little to do with async programming and asyncio, although the future-object
@@ -322,35 +354,35 @@ class ZarrArray(ZarrNode):
 
         Example to wait for the data::
 
-            f = zarr_array.get_chunk_future(...)
+            f = zarr_array.get_chunk_soon(...)
             data = f.result()
 
         Combine multiple reads in parallel::
 
-            f1 = zarr_array.get_chunk_future(...)
-            f2 = zarr_array.get_chunk_future(...)
-            f3 = zarr_array.get_chunk_future(...)
+            f1 = zarr_array.get_chunk_soon(...)
+            f2 = zarr_array.get_chunk_soon(...)
+            f3 = zarr_array.get_chunk_soon(...)
 
             data1, data2, data3 = [f.result() for f in [f1, f2, f3]]
 
         Asynchronously await the data::
 
-            f = zarr_array.get_chunk_future(...)
+            f = zarr_array.get_chunk_soon(...)
             data = await asyncio.wrap_future(f)
 
         Async and parallel reads::
 
-            f1 = zarr_array.get_chunk_future(...)
-            f2 = zarr_array.get_chunk_future(...)
-            f3 = zarr_array.get_chunk_future(...)
+            f1 = zarr_array.get_chunk_soon(...)
+            f2 = zarr_array.get_chunk_soon(...)
+            f3 = zarr_array.get_chunk_soon(...)
 
             asyncio_futures = [asyncio.wrap_future(f) for f in [f1, f2, f3]]
             data1, data2, data3 = await asyncio.gather(*asyncio_futures)
 
         """
-        return executor.submit(self.get_chunk, index)
+        return executor.submit(self.get_chunk_now, index)
 
-    def set_chunk(self, data, index, check_empty=True) -> None:
+    def set_chunk_now(self, index, data, check_empty=True) -> None:
         """Write a chunk to the store.
 
         Converts the index to the path for that chunk. Encodes the array
@@ -360,11 +392,15 @@ class ZarrArray(ZarrNode):
 
         # Check index
         if not isinstance(index, tuple):
-            raise TypeError(f"ZarrArray.set_chunk() needs a tuple index, got {index!r}")
+            raise TypeError(
+                f"ZarrArray.set_chunk_now() needs a tuple index, got {index!r}"
+            )
         if len(index) != len(self._shape):
-            raise IndexError(f"ZarrArray.set_chunk() needs {len(self._shape)} indices.")
+            raise IndexError(
+                f"ZarrArray.set_chunk_now() needs {len(self._shape)} indices."
+            )
         if not all(isinstance(i, int) for i in index):
-            raise ValueError("ZarrArray.set_chunk() needs integer indices.")
+            raise ValueError("ZarrArray.set_chunk_now() needs integer indices.")
 
         # Check data
         if not isinstance(data, np.ndarray):
@@ -375,7 +411,9 @@ class ZarrArray(ZarrNode):
             )
 
         # Write (or erase) the chunk
-        path = self._path + "/c/" + self._chunk_separator.join(f"{x}" for x in index)
+        path = "c/" + self._chunk_separator.join(f"{x}" for x in index)
+        if self._path:
+            path = self._path + "/" + path
         if check_empty and np.all(data == self._fill_value):
             try:
                 self._store.erase(path)
@@ -385,10 +423,10 @@ class ZarrArray(ZarrNode):
             encoded_bytes = encode_array(data, self._codecs)
             self._store.set(path, encoded_bytes)
 
-    def set_chunk_future(self, data, index) -> Future[None]:
+    def set_chunk_soon(self, index, data) -> Future[None]:
         """Write a chunk and return a ``concurrent.futures.Future``.
 
-        The writing happens in a separate thread (using a ``ThreadPoolExecutor``).
+        Calls ``set_chunk_now()`` in a separate thread (using a ``ThreadPoolExecutor``).
         One can wait for the result, and also combine multiple writes in parallel.
 
         This has little to do with async programming and asyncio, although the future-object
@@ -396,32 +434,32 @@ class ZarrArray(ZarrNode):
 
         Example to write and forget::
 
-            f = zarr_array.set_chunk_future(...)
+            f = zarr_array.set_chunk_soon(...)
 
         Combine multiple writes in parallel, and wait for them to finish::
 
-            f1 = zarr_array.set_chunk_future(...)
-            f2 = zarr_array.set_chunk_future(...)
-            f3 = zarr_array.set_chunk_future(...)
+            f1 = zarr_array.set_chunk_soon(...)
+            f2 = zarr_array.set_chunk_soon(...)
+            f3 = zarr_array.set_chunk_soon(...)
 
             [f.result() for f in [f1, f2, f3]]
 
         Asynchronously await the data::
 
-            f = zarr_array.set_chunk_future(...)
+            f = zarr_array.set_chunk_soon(...)
             await asyncio.wrap_future(f)
 
         Async and parallel reads::
 
-            f1 = zarr_array.set_chunk_future(...)
-            f2 = zarr_array.set_chunk_future(...)
-            f3 = zarr_array.set_chunk_future(...)
+            f1 = zarr_array.set_chunk_soon(...)
+            f2 = zarr_array.set_chunk_soon(...)
+            f3 = zarr_array.set_chunk_soon(...)
 
             asyncio_futures = [asyncio.wrap_future(f) for f in [f1, f2, f3]]
             await asyncio.gather(*asyncio_futures)
 
         """
-        return executor.submit(self.set_chunk, data, index)
+        return executor.submit(self.set_chunk_now, index, data)
 
     def _parse_metadata(self):
         meta = self._metadata

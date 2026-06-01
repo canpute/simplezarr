@@ -87,6 +87,7 @@ store_data = {
     "sub/array2/c/0/1": np.full((50, 50), 2.0, np.float32).tobytes(),
     "sub/array2/c/1/0": np.full((50, 50), 3.0, np.float32).tobytes(),
     "sub/array2/c/1/1": np.full((50, 50), 4.0, np.float32).tobytes(),
+    "foo/bar": b"extra dirs and files are ignored",
 }
 
 
@@ -152,7 +153,7 @@ def test_zarr_array1():
     assert a1.chunk_grid_shape == (1, 1, 1)
     assert a1.chunk_size == 8 * 6 * 4
 
-    chunk1 = a1.get_chunk((0, 0, 0))
+    chunk1 = a1.get_chunk_now((0, 0, 0))
     assert isinstance(chunk1, np.ndarray)
     assert chunk1.shape == (8, 6, 4)
     assert chunk1.dtype == np.uint16
@@ -179,32 +180,32 @@ def test_zarr_array2():
     assert a2.chunk_grid_shape == (2, 2)
     assert a2.chunk_size == 50 * 50
 
-    chunk1 = a2.get_chunk((0, 0))
+    chunk1 = a2.get_chunk_now((0, 0))
     assert isinstance(chunk1, np.ndarray)
     assert chunk1.shape == (50, 50)
     assert chunk1.dtype == np.float32
     assert np.all(chunk1 == 1.0)
 
-    chunk2 = a2.get_chunk((0, 1))
+    chunk2 = a2.get_chunk_now((0, 1))
     assert isinstance(chunk2, np.ndarray)
     assert chunk2.shape == (50, 50)
     assert chunk2.dtype == np.float32
     assert np.all(chunk2 == 2.0)
 
-    chunk3 = a2.get_chunk((1, 0))
+    chunk3 = a2.get_chunk_now((1, 0))
     assert isinstance(chunk3, np.ndarray)
     assert chunk3.shape == (50, 50)
     assert chunk3.dtype == np.float32
     assert np.all(chunk3 == 3.0)
 
-    chunk4 = a2.get_chunk((1, 1))
+    chunk4 = a2.get_chunk_now((1, 1))
     assert isinstance(chunk4, np.ndarray)
     assert chunk4.shape == (50, 50)
     assert chunk4.dtype == np.float32
     assert np.all(chunk4 == 4.0)
 
     # Out of range
-    chunk5 = a2.get_chunk((9, 0))
+    chunk5 = a2.get_chunk_now((9, 0))
     assert isinstance(chunk5, np.ndarray)
     assert chunk5.shape == (50, 50)
     assert chunk5.dtype == np.float32
