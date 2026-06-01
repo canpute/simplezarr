@@ -69,12 +69,12 @@ class ZarrSubArray:
 
     def __init__(self, array: ZarrArray, selection: tuple):
         self._array = array
-        shape = array._shape
+        shape = array.shape
 
         normalized_selection = normalize_selection(selection, shape)
         self._index_repr = get_selection_repr(normalized_selection, shape)
         self._chunk_index_infos = get_chunk_index_info_from_zarr_array_slice(
-            normalized_selection, shape, array._chunk_shape
+            normalized_selection, shape, array.chunk_shape
         )
 
         # Determine sub array shape
@@ -231,14 +231,14 @@ def write_chunk(
     try:
         is_full_chunk = (
             all(s.start == 0 for s in chunk_slices)
-            and tuple(s.stop for s in chunk_slices) == zarr_array._chunk_shape
+            and tuple(s.stop for s in chunk_slices) == zarr_array.chunk_shape
         )
         if isinstance(array_or_scalar, (float, int)):
             sub_data = array_or_scalar
             is_full_chunk = False
         else:
             sub_data = array_or_scalar[*array_slices].astype(
-                zarr_array._dtype, copy=False
+                zarr_array.dtype, copy=False
             )
         if is_full_chunk:
             data = sub_data
