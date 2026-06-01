@@ -56,73 +56,109 @@ store_data = {
 
 
 def test_normalize_selection():
-    shape = (100, 120)
+    shape1 = (100,)
+    shape2 = (100, 120)
+    shape3 = (100, 120, 150)
+    shape4 = (100, 120, 150, 190)
+
+    # Ellipsis
+
+    s = normalize_selection((...), shape1)
+    assert s == (slice(0, 100, 1),)
+
+    s = normalize_selection((...), shape2)
+    assert s == (slice(0, 100, 1), slice(0, 120, 1))
+
+    s = normalize_selection((...), shape3)
+    assert s == (slice(0, 100, 1), slice(0, 120, 1), slice(0, 150, 1))
+
+    s = normalize_selection((0, ...), shape3)
+    assert s == (0, slice(0, 120, 1), slice(0, 150, 1))
+
+    s = normalize_selection((..., 0), shape3)
+    assert s == (slice(0, 100, 1), slice(0, 120, 1), 0)
+
+    s = normalize_selection((0, ..., 0), shape3)
+    assert s == (0, slice(0, 120, 1), 0)
+
+    s = normalize_selection((0, ..., 0), shape4)
+    assert s == (0, slice(0, 120, 1), slice(0, 150, 1), 0)
+
+    with pytest.raises(IndexError):  # only one ellipsis
+        normalize_selection((..., 0, ...), shape3)
 
     # Full size
 
-    s = normalize_selection((...), shape)
+    s = normalize_selection((slice(None),), shape1)
+    assert s == (slice(0, 100, 1),)
+
+    s = normalize_selection((slice(None), slice(None)), shape2)
     assert s == (slice(0, 100, 1), slice(0, 120, 1))
 
-    s = normalize_selection((slice(None), slice(None)), shape)
-    assert s == (slice(0, 100, 1), slice(0, 120, 1))
+    s = normalize_selection((slice(None), slice(None), slice(None)), shape3)
+    assert s == (slice(0, 100, 1), slice(0, 120, 1), slice(0, 150, 1))
+
+    with pytest.raises(IndexError):  # ndim mismatch
+        normalize_selection((slice(None), slice(None)), shape1)
+
+    with pytest.raises(IndexError):  # ndim mismatch
+        normalize_selection((slice(None),), shape2)
 
     # Open ended
 
-    s = normalize_selection((slice(20), slice(100, None)), shape)
+    s = normalize_selection((slice(20), slice(100, None)), shape2)
     assert s == (slice(0, 20, 1), slice(100, 120, 1))
 
     # Negative
 
-    s = normalize_selection((slice(-20), slice(-100, None)), shape)
+    s = normalize_selection((slice(-20), slice(-100, None)), shape2)
     assert s == (slice(0, 80, 1), slice(20, 120, 1))
 
-    s = normalize_selection((slice(-40, -20), slice(-20, -40)), shape)
+    s = normalize_selection((slice(-40, -20), slice(-20, -40)), shape2)
     assert s == (slice(60, 80, 1), slice(100, 100, 1))
 
     # Bounds
 
-    s = normalize_selection((slice(-200, None), slice(-200)), shape)
+    s = normalize_selection((slice(-200, None), slice(-200)), shape2)
     assert s == (slice(0, 100, 1), slice(0, 0, 1))
 
-    s = normalize_selection((slice(50, 40), slice(50, -100)), shape)
+    s = normalize_selection((slice(50, 40), slice(50, -100)), shape2)
     assert s == (slice(50, 50, 1), slice(50, 50, 1))
 
-    s = normalize_selection((slice(0, 200), slice(200, 100)), shape)
+    s = normalize_selection((slice(0, 200), slice(200, 100)), shape2)
     assert s == (slice(0, 100, 1), slice(120, 120, 1))
 
     # Ints
 
-    s = normalize_selection((3, 4), shape)
+    s = normalize_selection((3, 4), shape2)
     assert s == (3, 4)
 
-    s = normalize_selection((-3, -4), shape)
+    s = normalize_selection((-3, -4), shape2)
     assert s == (97, 116)
 
     # Steps
 
-    s = normalize_selection((slice(None, None, 2), slice(10, 80, 3)), shape)
+    s = normalize_selection((slice(None, None, 2), slice(10, 80, 3)), shape2)
     assert s == (slice(0, 100, 2), slice(10, 80, 3))
 
     # Fails
 
     with pytest.raises(IndexError):  # No floats
-        normalize_selection((0, 1.2), shape)
+        normalize_selection((0, 1.2), shape2)
     with pytest.raises(IndexError):  # No floats
-        normalize_selection((0, slice(1.2)), shape)
-    with pytest.raises(IndexError):  # only one ellipsis
-        normalize_selection((..., ...), shape)
+        normalize_selection((0, slice(1.2)), shape2)
     with pytest.raises(IndexError):  # ndim mismatch
-        normalize_selection((3,), shape)
+        normalize_selection((3,), shape2)
     with pytest.raises(IndexError):  # ndim mismatch
-        normalize_selection((3, 4, 5), shape)
+        normalize_selection((3, 4, 5), shape2)
     with pytest.raises(IndexError):  # step cannot be zero
-        normalize_selection((0, slice(0, 100, 0)), shape)
+        normalize_selection((0, slice(0, 100, 0)), shape2)
     with pytest.raises(IndexError):  # step cannot be neg
-        normalize_selection((0, slice(0, 100, -1)), shape)
+        normalize_selection((0, slice(0, 100, -1)), shape2)
     with pytest.raises(IndexError):  # int index out of range
-        normalize_selection((0, 1000), shape)
+        normalize_selection((0, 1000), shape2)
     with pytest.raises(IndexError):  # int index out of range
-        normalize_selection((0, -1000), shape)
+        normalize_selection((0, -1000), shape2)
 
 
 def test_indexing_read():
