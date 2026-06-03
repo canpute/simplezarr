@@ -49,14 +49,12 @@ class StoreThatFillsTheGaps:
         self._store = STORE.copy()
 
     def get(self, key: str) -> bytes:
-        check_key(self, "get", key)
         try:
             return self._store[key]
         except KeyError:
             raise IOError(f"get(): key {key!r} does not exist.") from None
 
     def set(self, key: str, value: bytes):
-        check_key(self, "set", key)
         dir = ""
         for d in key.split("/")[:-1]:
             dir += f"{d}/"
@@ -65,7 +63,6 @@ class StoreThatFillsTheGaps:
         self._store[key] = value
 
     def erase(self, key: str):
-        check_key(self, "erase", key)
         try:
             self._store.pop(key)
         except KeyError:
@@ -81,7 +78,6 @@ class ReadableStoreTestable(StoreThatFillsTheGaps, ReadableStore):
 
 class WritableStoreTestable(StoreThatFillsTheGaps, WritableStore):
     def list_prefix(self, prefix: str) -> List[str]:
-        check_prefix(self, "list_prefix", prefix)
         prefix = "" if prefix == "/" else prefix  # Special case
         return [key for key in self.list() if key.startswith(prefix)]
 
