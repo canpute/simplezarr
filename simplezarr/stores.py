@@ -1,14 +1,3 @@
-"""
-Zarr data is stored as a set of key-value pairs. This can be a directory with
-files on your hard-drive. Or a Python dict in memory, or a remote resource
-accessible over the internet.
-
-Stores give access to that data in a consistent way, so that the code that
-reads/writes the Zarr data does not have to care how/where the data is stored.
-Multiple implementations are provided. But also wrapper stores for various
-purposes.
-"""
-
 # The store interface and implementations. This code follows the abstract store
 # interface as defines in the Zarr spec:
 #
@@ -115,7 +104,17 @@ def check_key_start_value(ob: object, key_start_value) -> tuple[str, int, bytes]
 
 
 class BaseStore:
-    """The base store class."""
+    """The base store class.
+
+    Zarr data is stored as a set of key-value pairs. This can be a directory with
+    files on your hard-drive. Or a Python dict in memory, or a remote resource
+    accessible over the internet.
+
+    Stores give access to that data in a consistent way, so that the code that
+    reads/writes the Zarr data does not have to care how/where the data is stored.
+    Multiple implementations are provided. But also wrapper stores for various
+    purposes.
+    """
 
     pass
 

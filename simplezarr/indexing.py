@@ -1,7 +1,3 @@
-"""
-Implementation for Zarr array indexing.
-"""
-
 from __future__ import annotations  # Using class names for types without Ruff F821
 
 from math import ceil

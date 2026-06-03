@@ -1,7 +1,3 @@
-"""
-Zarr files are made up of a tree of nodes. Each node is either a ``ZarrGroup`` or a ``ZarrArray``. The arrays are the leaf nodes.
-"""
-
 from __future__ import annotations  # Using class names for types without Ruff F821
 
 import json
@@ -25,7 +21,13 @@ __all__ = [
 
 
 def open_zarr(store: ReadableStore) -> ZarrNode:
-    """Open a zarr file using the given store."""
+    """Open a zarr file using the given store.
+
+    Zarr files are made up of a tree of nodes. Each node is either a
+    ``ZarrGroup`` or a ``ZarrArray``. The arrays are the leaf nodes. When
+    opening a Zarr file, it may be a single array, or a group containing
+    multiple arrays.
+    """
     return ZarrNode._from_path(store, "")
 
 
@@ -36,7 +38,7 @@ def join(*path_parts):
 class ZarrNode:
     """The base class for ``ZarrGroup`` and ``ZarrArray``.
 
-    A zarr file is made up of nodes, where arrays are the lead nodes.
+    A Zarr file is made up of nodes, where arrays are the leaf nodes.
     Each node is represented by a 'directory' and a corresponding 'zarr.json'
     that contains information about the node.
     """
@@ -123,9 +125,9 @@ class ZarrGroup(ZarrNode):
     """The class that represents a group in a Zarr file.
 
     The ``repr()`` of a group shows its children. One can navigate
-    the Zarr file by indexing:
+    the Zarr file by indexing::
 
-        zarr_group['path/to/node']
+        sub_node = zarr_group['path/to/node']
 
     """
 
@@ -216,7 +218,9 @@ class ZarrArray(ZarrNode):
     """The class that represents a Zarr array.
 
     These arrays don't contain any bytes themselves, but are used as proxies
-    to load data from the store, and provide these as numpy arrays.
+    that provide metadata about the array. Indexing into a ``ZarrArray`` gives a
+    ``ZarrArraySlice`` which can be used to get and set the data as numpy
+    arrays.
     """
 
     def _one_line_repr(self):
