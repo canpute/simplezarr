@@ -1,90 +1,91 @@
 # simplezarr
 A simple, elegant, and efficient Zarr implementation
 
-The core of `simplezarr` implements the Zarr 3 spec in straightforward
-Python, without extra fuzz. This makes the code easy to follow, and gives
-predictable performance. Extra functionality is provided as functions and classes
-that are provided in `simplezarr.utils`.
 
-Since `simplezarr` is nice and simple, it's easy to adopt in various
-use-cases. It supports parallel io, but does not force the use of asyncio.
+## Intro
+
+Zarr 3 is a great file format for large datasets. It's nice and elegant.
+The `simplezarr` lib is what happens when one implemented this spec as directly as possible in Python.
 
 
-## Status
+## Details
 
-* Supports a sync API that does things in parallel when multiple chunks are involved.
-* Async API based on ``concurrent.futures.Future``.
-* Stores are implemented, (except no remote stores yet).
-* Codecs are implemented (all except for sharding).
-* Support for reading and writing individual chunks. Easy to parallelize.
-* Indexing to read and write regions (no support for index arrays yet).
+Parallelism and async are achieved using a thread-pool and `concurrent.futures.Future` objects.
+You can use it with async frameworks (like asyncio), but none of it is forced.
+You can use it synchronously and still benefit from parallelism.
+Calls that return a `Future` have a `_soon` suffix. Calls that are blocking have a `_now` suffix.
+
+The core is simple, easy to follow, and gives predictable performance.
+Extra functionality is provided as functions and classes that are provided in `simplezarr.utils`.
+This keeps the lib light, and easy to adopt in a wide variety of use cases.
+
+The Zarr 3.1 spec is fully implemented, except for sharding. The core has 100% test coverage.
 
 
-## Motivation
+## Installation
 
-Zarr 3 is a great file format for large datasets. It's nice and elegant. The
-`simplezarr` lib is what happened when we took the Zarr 3 spec, and implemented
-it as directly as possible.
-
-Parallelism is achieved using a thread-pool and `concurrent.futures.Future`
-objects. Calls that return a `Future` have a `_soon` suffix. Calls that
-are blocking have a `_now` suffix.
-
-We don't force asyncio. In fact, ``simplezarr`` does not even import
-asyncio (except in code paths that represent a utility specific to asyncio
-users).
-
+```
+pip install simplezarr
+```
 
 ## Quick example
 
+Write a Zarr file to an in-memory store:
+
 ```py
+>>> import simplezarr
 
-    # Create a store
-    store = simplezarr.LocalStore(filename)
+>>> store = simplezarr.MemoryStore()
 
-    # Open as zarr
-    group = simplezarr.open_zarr(store)
+>>> simplezarr.ZarrGroup.create(store, "")
 
-    # Navigate to array
-    array = group["foo/array"]
+>>> arr = simplezarr.ZarrArray.create(store, "array1", (1000, 1000), "uint16", chunk_shape=(64, 64))
 
-    # Get a numpy array (blocking)
-    a = array[:200, :200].get_now()
+>>> arr[...].set_now(42)
+```
 
-      # Load two regions in parallel
-    f1 = array[:200, :200].get_soon()
-    f2 = array[1000:1200, :200].get_soon()
-    a1, a2 = [f1.result(), f2.result()]
+Reading:
+
+```py
+>>> group = simplezarr.open_zarr(store)
+
+>>> group
+<ZarrGroup '' with 1 children at 0x10910a5d0>
+    <ZarrArray 'array1' 1000x1000 uint16 at 0x10910a490>
+
+>>> arr = group["array1"]
+
+>>> a = arr[:100, :100].get_now()  # blocking, but reads chunks in parallel
+
+>>> a
+array([[42, 42, 42, ..., 42, 42, 42],
+       [42, 42, 42, ..., 42, 42, 42],
+       [42, 42, 42, ..., 42, 42, 42],
+       ...,
+       [42, 42, 42, ..., 42, 42, 42],
+       [42, 42, 42, ..., 42, 42, 42],
+       [42, 42, 42, ..., 42, 42, 42]], shape=(100, 100), dtype=uint16)
+```
+
+Parallel/lazy reads:
+```py
+>>> f1 = array[:200, :200].get_soon()
+
+>>> f2 = array[-200:, -200:].get_soon()
+
+>>> a1, a2 = [f1.result(), f2.result()]
 ```
 
 
-## Comparison with zarr-python
+## Developers
 
-Why not use zarr-python? We ran into performance issues, and upon
-investigating what happens under the hood, we found it hard to follow the path
-that the code takes, especially regarding threading and asyncio. Granted, part
-of that complexity is because it must also support older Zarr versions.
-Another reason is that zarr-python does not seem to have a way to read individual blocks
-asynchronously (`AsyncArray.get_block_selection()` does not exist), which was a
-requirement for our use-case.
+* Clone the repo.
+* Install `rendercanvas` and developer deps using `pip install -e .[dev]`.
+* Use `ruff format` to apply autoformatting.
+* Use `ruff check` to check for linting errors.
+* Use `pytest tests` to run the tests. Or `pytest tests --cov=simplezarr --cov-report=html` to get coverage reporting.
 
-### What zarr-python does
 
-* The store loads data using `asyncio.to_thread()`. This runs the io-bound reading of bytes in a separate thread (from the loop's default `ThreadPoolExecutor`).
-* It uses `asyncio.gather()` is parallelize concurrent reads/writes.
-* When using the `zarr.Array` (not `AsyncArray`), indexing is synchronous. To do this:
-  * It uses a dedicated asyncio loop that runs continuously in a dedicated thread.
-  * A dedicated `ThreadPoolExecutor` is set on that loop (which will be used to perform the store IO with).
-  * Then `asyncio.run_coroutine_threadsafe(the_asyncio_coroutine, dedicated_loop)` to turn the asyncio code into a `concurrent.futures.Future`.
-  * Then sync-wait on that future.
+## License
 
-It looks like this complexity is one of the reasons why the performance of ome-zarr is hard to get right. The ome-zarr library wraps zarr-python with Dask, which uses thread pools too, which results in a lot of threads being spawned.
-
-### What simplezarr does
-
-* Stores are synchronous.
-* `simplezarr.Array.get_chunk_now()` is synchronous (no threading or async).
-* `simplezarr.Array.get_chunk_soon()` uses a `ThreadPoolExecutor`. It returns a `concurrent.futures.Future`.
-* This is enough to support concurrently reads.
-* No asyncio anywhere.
-* But can be used in `asyncio` (and other frameworks) using `await asyncio.wrap_future(f)` or `f.add_done_callback(call_soon_threadsafe)`.
+This code is distributed under the MIT license.
