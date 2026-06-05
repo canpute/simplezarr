@@ -50,10 +50,10 @@ class ZarrNode:
         metadata: dict | None = None,
     ):
         # Check path
-        if not isinstance(path, str):  # no-cover
+        if not isinstance(path, str):
             raise TypeError(f"{self.__class__.__name__} path must be str, got {path!r}")
         path = path.lstrip("/")
-        if path.endswith("/"):  # no-cover
+        if path.endswith("/"):
             raise ValueError(
                 f"{self.__class__.__name__} path must not end with '/' unless root, got {path!r}"
             )
@@ -64,6 +64,7 @@ class ZarrNode:
 
         assert isinstance(metadata, dict)
         self._metadata = metadata
+        self._attributes = {}
         self._parse_metadata()
 
         self._init_node()
@@ -107,12 +108,17 @@ class ZarrNode:
         """The full metadata for this node, as a Python dictionary."""
         return self._metadata
 
+    @property
+    def attributes(self) -> dict:
+        """The attributes of this node. I.e. ``metadata["attributes"]``"""
+        return self._attributes
+
     def print_metadata(self):
         """Print a readable representation of the metadata."""
         print(json.dumps(self._metadata, indent=4))
 
-    def _one_line_repr(self):  # no-cover
-        return f"<{self.__class__.__name__} '{self._path}' at {hex(id(self))}>"
+    def _one_line_repr(self):
+        raise NotImplementedError()
 
     def _parse_metadata(self):
         raise NotImplementedError()
@@ -144,9 +150,9 @@ class ZarrGroup(ZarrNode):
                 Additional metadata.
         """
         # Checks
-        if not isinstance(path, str):  # no-cover
+        if not isinstance(path, str):
             raise TypeError(f"ZarrGroup path must be str, got {path!r}")
-        if not (attributes is None or isinstance(attributes, dict)):  # no-cover
+        if not (attributes is None or isinstance(attributes, dict)):
             raise TypeError(
                 f"ZarrGroup attributes must be None or dict, got {attributes!r}"
             )
@@ -165,6 +171,34 @@ class ZarrGroup(ZarrNode):
 
         return cls(store, path, metadata)
 
+    def _parse_metadata(self):
+        meta = self._metadata
+
+        # Parse mandatory fields
+        assert meta["node_type"] == "group"
+
+        # Parse optional fields
+        self._attributes = meta.get("attributes", {})
+
+    def _init_node(self):
+        # Assume ListableStore
+
+        # todo: use consolidated metadata
+        # todo: use list_dir only lazily
+
+        n = len(self._path)
+        items = self._store.list_dir(self._path + "/")
+        dir_names = [item[n:].strip("/") for item in items if item.endswith("/")]
+
+        self._children = {}
+        for name in dir_names:
+            try:
+                node = ZarrNode._from_path(self._store, f"{self._path}/{name}")
+            except IOError:
+                continue
+            else:
+                self._children[name] = node
+
     def __repr__(self):
         return self.get_structure(max_depth=1)
 
@@ -175,11 +209,6 @@ class ZarrGroup(ZarrNode):
     def children(self) -> tuple[ZarrNode]:
         """The child nodes of this group. These can be groups or arrays."""
         return tuple(self._children.values())
-
-    @property
-    def attributes(self) -> dict:
-        """The attributes of this group. I.e. ``metadata["attributes"]``"""
-        return self._attributes
 
     def print_structure(self, max_depth: int = 999):
         """Print the structure of the Zarr file from this group and below."""
@@ -218,34 +247,6 @@ class ZarrGroup(ZarrNode):
             return ob[remaining_path]
         else:
             return ob
-
-    def _parse_metadata(self):
-        meta = self._metadata
-
-        # Parse mandatory fields
-        assert meta["node_type"] == "group"
-
-        # Parse optional fields
-        self._attributes = meta.get("attributes", {})
-
-    def _init_node(self):
-        # Assume ListableStore
-
-        # todo: use consolidated metadata
-        # todo: use list_dir only lazily
-
-        n = len(self._path)
-        items = self._store.list_dir(self._path + "/")
-        dir_names = [item[n:].strip("/") for item in items if item.endswith("/")]
-
-        self._children = {}
-        for name in dir_names:
-            try:
-                node = ZarrNode._from_path(self._store, f"{self._path}/{name}")
-            except IOError:
-                continue
-            else:
-                self._children[name] = node
 
 
 class ZarrArray(ZarrNode):
@@ -302,7 +303,7 @@ class ZarrArray(ZarrNode):
         """
 
         # Check path
-        if not isinstance(path, str):  # no-cover
+        if not isinstance(path, str):
             raise TypeError(f"ZarrArray path must be str, got {path!r}")
 
         # Check dtype
@@ -310,22 +311,20 @@ class ZarrArray(ZarrNode):
             dtype = dtype.__name__
         elif isinstance(dtype, np.dtype):
             dtype = dtype.name
-        elif not isinstance(dtype, str):  # no-cover
+        elif not isinstance(dtype, str):
             raise TypeError(f"ZarrArray dtype must be str, got {dtype!r}")
-        if not (
-            dtype in DTYPES or (dtype.startswith("r") and dtype[1:].isnumeric())
-        ):  # no-cover
+        if not (dtype in DTYPES or (dtype.startswith("r") and dtype[1:].isnumeric())):
             # Currently ignoring possible dtypes of extensions
-            raise ValueError(f"ZarrArray dtype must be one of {DTYPES}, got {dtype!r}")
+            raise TypeError(f"ZarrArray dtype must be one of {DTYPES}, got {dtype!r}")
 
         # Check shape
         ndim = len(shape)
         shape = tuple(int(i) for i in shape)
-        if ndim < 1:  # no-cover
+        if ndim < 1:
             raise ValueError(
                 f"ZarrArray dimensions must be at least 1D, got shape {shape!r}"
             )
-        if any(i <= 0 for i in shape):  # no-cover
+        if any(i <= 0 for i in shape):
             raise ValueError(
                 f"ZarrArray dimensions cannot be zero or less, got shape {shape!r}"
             )
@@ -333,11 +332,11 @@ class ZarrArray(ZarrNode):
         # Check and resolve chunk_grid
         if chunk_shape is None:
             chunk_shape = shape
-        if len(chunk_shape) != ndim:  # no-cover
+        if len(chunk_shape) != ndim:
             raise ValueError(
                 f"ZarrArray chunk_shape does not match the shape ndim ({ndim}), got {chunk_shape!r}"
             )
-        if any(i <= 0 for i in chunk_shape):  # no-cover
+        if any(i <= 0 for i in chunk_shape):
             raise ValueError(
                 f"ZarrArray chunk_shape cannot have zero or less dimensions, got {chunk_shape!r}"
             )
@@ -349,7 +348,7 @@ class ZarrArray(ZarrNode):
         # Check and create chunk_key_encoding
         if chunk_path_separator is None:
             chunk_path_separator = "/"
-        if not isinstance(chunk_path_separator, str):  # no-cover
+        if not isinstance(chunk_path_separator, str):
             raise TypeError(
                 f"ZarrArray chunk_path_separator must be str got {chunk_path_separator!r}"
             )
@@ -386,7 +385,7 @@ class ZarrArray(ZarrNode):
         }
 
         if attributes is not None:
-            if not isinstance(attributes, dict):  # no-cover
+            if not isinstance(attributes, dict):
                 raise TypeError(
                     f"ZarrGroup attributes must be None or dict, got {attributes!r}"
                 )
@@ -398,7 +397,7 @@ class ZarrArray(ZarrNode):
 
         if dimension_names is not None:
             dimension_names = tuple(str(s) for s in dimension_names)
-            if len(dimension_names) != ndim:  # no-cover
+            if len(dimension_names) != ndim:
                 raise ValueError(
                     f"ZarrArray dimension_names must match ndim {ndim}, got {dimension_names!r}"
                 )
@@ -409,6 +408,51 @@ class ZarrArray(ZarrNode):
         store.set(join(path, "zarr.json"), json_text.encode())
 
         return cls(store, path, metadata)
+
+    def _parse_metadata(self):
+        meta = self._metadata
+
+        # Parse mandatory fields
+
+        assert meta["node_type"] == "array"
+
+        self._shape = tuple(int(i) for i in meta["shape"])
+        self._dtype = dtype = meta["data_type"]
+
+        i = len(dtype)
+        while i > 0 and dtype[i - 1].isdigit():
+            i -= 1
+        self._dtype_bits = int(dtype[i:]) if i < len(dtype) else 8
+
+        self._chunk_grid = meta["chunk_grid"]
+        assert self._chunk_grid["name"] == "regular"
+        self._chunk_shape = tuple(self._chunk_grid["configuration"]["chunk_shape"])
+
+        self._chunk_grid_shape = tuple(
+            math.ceil(array_s / chunk_s)
+            for array_s, chunk_s in zip(self._shape, self._chunk_shape, strict=True)
+        )
+
+        self._chunk_key_encoding = meta["chunk_key_encoding"]
+        assert self._chunk_key_encoding["name"] == "default"
+        self._chunk_path_separator = self._chunk_key_encoding["configuration"][
+            "separator"
+        ]
+
+        self._fill_value = resolve_fill_value(meta["fill_value"], self._dtype)[0]
+
+        self._codecs = meta["codecs"]
+        assert len(self._codecs) >= 1
+        assert self._codecs[0]["name"] == "bytes"
+
+        # Parse optional fields
+
+        self._attributes = meta.get("attributes", None)
+        self._storage_transformers = meta.get("storage_transformers", None)
+        self._dimension_names = meta.get("dimension_names", None)
+
+    def _init_node(self):
+        pass
 
     def _one_line_repr(self):
         shape_str = "x".join(str(i) for i in self.shape)
@@ -497,7 +541,7 @@ class ZarrArray(ZarrNode):
             "ZarrArray does not support index assignment (``a[..] = foo``), instead use ``a[..].set_now(foo)`` or ``a[..].set_soon(foo)``."
         )
 
-    def get_chunk_now(self, index) -> np.ndarray:
+    def get_chunk_now(self, index, none_if_missing=False) -> None | np.ndarray:
         """Read a chunk from the store.
 
         This function is synchronous; you may want to use ``get_chunk_soon()``
@@ -506,8 +550,10 @@ class ZarrArray(ZarrNode):
         Converts the index to the path for that chunk, load the bytes
         from the store, and decode them into a numpy array. This
         function is blocking (no threading or async).
+
+        If the chunk does not exist, an array populated with the fill-value is returned,
+        unless ``none_if_missing`` is True, in which case None is returned.
         """
-        # TODO: kwarg to return None when the chunk does not exist
 
         # Check index
         if not isinstance(index, tuple):
@@ -518,8 +564,10 @@ class ZarrArray(ZarrNode):
             raise IndexError(
                 f"ZarrArray.get_chunk_now() needs {len(self._shape)} indices."
             )
-        if not all(isinstance(i, int) for i in index):
-            raise ValueError("ZarrArray.get_chunk_now() needs integer indices.")
+        if not all(isinstance(i, int) and i >= 0 for i in index):
+            raise IndexError(
+                "ZarrArray.get_chunk_now() needs positive integer indices."
+            )
 
         # Load data. This could take a while if it's a remote/slow store
         path = "c/" + self._chunk_path_separator.join(f"{x}" for x in index)
@@ -528,11 +576,16 @@ class ZarrArray(ZarrNode):
         try:
             encoded_bytes = self._store.get(path)
         except IOError:
-            return np.full(self._chunk_shape, self._fill_value, self._dtype)
+            encoded_bytes = None
 
         # Return decoded
-        array_type = create_ndarray_type(self._chunk_shape, self._dtype)
-        return decode_bytes(memoryview(encoded_bytes), self._codecs, array_type)
+        if encoded_bytes is not None:
+            array_type = create_ndarray_type(self._chunk_shape, self._dtype)
+            return decode_bytes(memoryview(encoded_bytes), self._codecs, array_type)
+        elif none_if_missing:
+            return None
+        else:
+            return np.full(self._chunk_shape, self._fill_value, self._dtype)
 
     def get_chunk_soon(self, index) -> Future[np.ndarray]:
         """Read a chunk and return a ``concurrent.futures.Future``.
@@ -590,8 +643,10 @@ class ZarrArray(ZarrNode):
             raise IndexError(
                 f"ZarrArray.set_chunk_now() needs {len(self._shape)} indices."
             )
-        if not all(isinstance(i, int) for i in index):
-            raise ValueError("ZarrArray.set_chunk_now() needs integer indices.")
+        if not all(isinstance(i, int) and i >= 0 for i in index):
+            raise IndexError(
+                "ZarrArray.set_chunk_now() needs positive integer indices."
+            )
 
         # Check data
         if not isinstance(data, np.ndarray):
@@ -651,48 +706,3 @@ class ZarrArray(ZarrNode):
 
         """
         return executor.submit(self.set_chunk_now, index, data)
-
-    def _parse_metadata(self):
-        meta = self._metadata
-
-        # Parse mandatory fields
-
-        assert meta["node_type"] == "array"
-
-        self._shape = tuple(int(i) for i in meta["shape"])
-        self._dtype = dtype = meta["data_type"]
-
-        i = len(dtype)
-        while i > 0 and dtype[i - 1].isdigit():
-            i -= 1
-        self._dtype_bits = int(dtype[i:]) if i < len(dtype) else 8
-
-        self._chunk_grid = meta["chunk_grid"]
-        assert self._chunk_grid["name"] == "regular"
-        self._chunk_shape = tuple(self._chunk_grid["configuration"]["chunk_shape"])
-
-        self._chunk_grid_shape = tuple(
-            math.ceil(array_s / chunk_s)
-            for array_s, chunk_s in zip(self._shape, self._chunk_shape, strict=True)
-        )
-
-        self._chunk_key_encoding = meta["chunk_key_encoding"]
-        assert self._chunk_key_encoding["name"] == "default"
-        self._chunk_path_separator = self._chunk_key_encoding["configuration"][
-            "separator"
-        ]
-
-        self._fill_value = resolve_fill_value(meta["fill_value"], self._dtype)[0]
-
-        self._codecs = meta["codecs"]
-        assert len(self._codecs) >= 1
-        assert self._codecs[0]["name"] == "bytes"
-
-        # Parse optional fields
-
-        self._attributes = meta.get("attributes", None)
-        self._storage_transformers = meta.get("storage_transformers", None)
-        self._dimension_names = meta.get("dimension_names", None)
-
-    def _init_node(self):
-        pass

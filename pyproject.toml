@@ -44,8 +44,9 @@ ignore = [
 
 [tool.coverage.report]
 
+omit = ['_version.py']
+
 exclude_also = [
-    # Have to re-enable the standard pragma, plus a less-ugly flavor
     "pragma: no cover",
     "no-cover",
     "raise NotImplementedError",
