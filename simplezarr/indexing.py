@@ -226,7 +226,7 @@ class Aggregator:
 
 
 def read_chunk(zarr_array, aggregator, array, array_slices, chunk_index, chunk_slices):
-    """Function to run in the exectutor to read a chunk."""
+    """Function to run in the executor to read a chunk."""
     try:
         data = zarr_array.get_chunk_now(chunk_index)
         array[*array_slices] = data[*chunk_slices]

@@ -50,10 +50,10 @@ class ZarrNode:
         metadata: dict | None = None,
     ):
         # Check path
-        if not isinstance(path, str):  # no-cover
+        if not isinstance(path, str):
             raise TypeError(f"{self.__class__.__name__} path must be str, got {path!r}")
         path = path.lstrip("/")
-        if path.endswith("/"):  # no-cover
+        if path.endswith("/"):
             raise ValueError(
                 f"{self.__class__.__name__} path must not end with '/' unless root, got {path!r}"
             )
@@ -117,8 +117,8 @@ class ZarrNode:
         """Print a readable representation of the metadata."""
         print(json.dumps(self._metadata, indent=4))
 
-    def _one_line_repr(self):  # no-cover
-        return f"<{self.__class__.__name__} '{self._path}' at {hex(id(self))}>"
+    def _one_line_repr(self):
+        raise NotImplementedError()
 
     def _parse_metadata(self):
         raise NotImplementedError()
@@ -150,9 +150,9 @@ class ZarrGroup(ZarrNode):
                 Additional metadata.
         """
         # Checks
-        if not isinstance(path, str):  # no-cover
+        if not isinstance(path, str):
             raise TypeError(f"ZarrGroup path must be str, got {path!r}")
-        if not (attributes is None or isinstance(attributes, dict)):  # no-cover
+        if not (attributes is None or isinstance(attributes, dict)):
             raise TypeError(
                 f"ZarrGroup attributes must be None or dict, got {attributes!r}"
             )
@@ -303,7 +303,7 @@ class ZarrArray(ZarrNode):
         """
 
         # Check path
-        if not isinstance(path, str):  # no-cover
+        if not isinstance(path, str):
             raise TypeError(f"ZarrArray path must be str, got {path!r}")
 
         # Check dtype
@@ -311,22 +311,20 @@ class ZarrArray(ZarrNode):
             dtype = dtype.__name__
         elif isinstance(dtype, np.dtype):
             dtype = dtype.name
-        elif not isinstance(dtype, str):  # no-cover
+        elif not isinstance(dtype, str):
             raise TypeError(f"ZarrArray dtype must be str, got {dtype!r}")
-        if not (
-            dtype in DTYPES or (dtype.startswith("r") and dtype[1:].isnumeric())
-        ):  # no-cover
+        if not (dtype in DTYPES or (dtype.startswith("r") and dtype[1:].isnumeric())):
             # Currently ignoring possible dtypes of extensions
-            raise ValueError(f"ZarrArray dtype must be one of {DTYPES}, got {dtype!r}")
+            raise TypeError(f"ZarrArray dtype must be one of {DTYPES}, got {dtype!r}")
 
         # Check shape
         ndim = len(shape)
         shape = tuple(int(i) for i in shape)
-        if ndim < 1:  # no-cover
+        if ndim < 1:
             raise ValueError(
                 f"ZarrArray dimensions must be at least 1D, got shape {shape!r}"
             )
-        if any(i <= 0 for i in shape):  # no-cover
+        if any(i <= 0 for i in shape):
             raise ValueError(
                 f"ZarrArray dimensions cannot be zero or less, got shape {shape!r}"
             )
@@ -334,11 +332,11 @@ class ZarrArray(ZarrNode):
         # Check and resolve chunk_grid
         if chunk_shape is None:
             chunk_shape = shape
-        if len(chunk_shape) != ndim:  # no-cover
+        if len(chunk_shape) != ndim:
             raise ValueError(
                 f"ZarrArray chunk_shape does not match the shape ndim ({ndim}), got {chunk_shape!r}"
             )
-        if any(i <= 0 for i in chunk_shape):  # no-cover
+        if any(i <= 0 for i in chunk_shape):
             raise ValueError(
                 f"ZarrArray chunk_shape cannot have zero or less dimensions, got {chunk_shape!r}"
             )
@@ -350,7 +348,7 @@ class ZarrArray(ZarrNode):
         # Check and create chunk_key_encoding
         if chunk_path_separator is None:
             chunk_path_separator = "/"
-        if not isinstance(chunk_path_separator, str):  # no-cover
+        if not isinstance(chunk_path_separator, str):
             raise TypeError(
                 f"ZarrArray chunk_path_separator must be str got {chunk_path_separator!r}"
             )
@@ -387,7 +385,7 @@ class ZarrArray(ZarrNode):
         }
 
         if attributes is not None:
-            if not isinstance(attributes, dict):  # no-cover
+            if not isinstance(attributes, dict):
                 raise TypeError(
                     f"ZarrGroup attributes must be None or dict, got {attributes!r}"
                 )
@@ -399,7 +397,7 @@ class ZarrArray(ZarrNode):
 
         if dimension_names is not None:
             dimension_names = tuple(str(s) for s in dimension_names)
-            if len(dimension_names) != ndim:  # no-cover
+            if len(dimension_names) != ndim:
                 raise ValueError(
                     f"ZarrArray dimension_names must match ndim {ndim}, got {dimension_names!r}"
                 )

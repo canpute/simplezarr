@@ -110,6 +110,16 @@ def test_zarr_group():
     assert isinstance(g, ZarrNode)
     assert isinstance(g, ZarrGroup)
 
+    # Could in theory also instantiate it directly
+    minimal_metadata = {"zarr_format": 3, "node_type": "group"}
+    g2 = ZarrGroup(store, "", minimal_metadata)
+
+    # But these fail
+    with pytest.raises(TypeError):
+        ZarrGroup(store, b"", minimal_metadata)
+    with pytest.raises(ValueError):
+        ZarrGroup(store, "foo/", minimal_metadata)
+
     # Structure info
     assert len(g.children) == 1
     assert repr(g).count("<Zarr") == 2  # nesting 1
@@ -360,6 +370,50 @@ def test_zarr_getting_and_setting_chunks_parallel():
     for p, val in zip(promises, values, strict=True):
         a = p.result()
         assert np.all(a == val)
+
+
+def test_zarr_create_fails():
+    s = MemoryStore()
+
+    # Groups
+
+    ZarrGroup.create(s, "")
+
+    with pytest.raises(TypeError):
+        ZarrGroup.create(s, b"")
+    with pytest.raises(TypeError):
+        ZarrGroup.create(s, "", attributes=["spam"])
+
+    # Arrays
+
+    ZarrArray.create(s, "array", (100, 100), "float32")
+
+    with pytest.raises(TypeError):
+        ZarrArray.create(s, b"array", (100, 100), "float32")
+
+    with pytest.raises(ValueError):
+        ZarrArray.create(s, "array", (), "float32")
+    with pytest.raises(ValueError):
+        ZarrArray.create(s, "array", (-10, 100), "float32")
+
+    with pytest.raises(TypeError):
+        ZarrArray.create(s, "array", (100, 100), b"float32")
+    with pytest.raises(TypeError):
+        ZarrArray.create(s, "array", (100, 100), "notknown")
+
+    with pytest.raises(ValueError):
+        ZarrArray.create(s, "array", (100,100), "float32", chunk_shape=(10,))
+    with pytest.raises(ValueError):
+        ZarrArray.create(s, "array", (100, 100), "float32", chunk_shape=(10, -10))
+
+    with pytest.raises(TypeError):
+        ZarrArray.create(s, "array", (100, 100), "float32", chunk_path_separator=3)
+
+    with pytest.raises(TypeError):
+        ZarrArray.create(s, "array", (100, 100), "float32", attributes=[])
+
+    with pytest.raises(ValueError):
+        ZarrArray.create(s, "array", (100, 100), "float32", dimension_names=["x"])
 
 
 def test_zarr_replicate_hardcoded_store():
