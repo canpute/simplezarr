@@ -89,12 +89,12 @@ class ZarrNode:
 
     @property
     def store(self) -> BaseStore:
-        """The store for this node."""
+        """The store where the data related to this node is stored."""
         return self._store
 
     @property
     def name(self) -> str:
-        """The name of this node."""
+        """The name of this node, i.e. the part of the path after the last slash."""
         return self._name
 
     @property
@@ -104,7 +104,7 @@ class ZarrNode:
 
     @property
     def metadata(self) -> dict:
-        """The metadata as a dictionary."""
+        """The full metadata for this node, as a Python dictionary."""
         return self._metadata
 
     def print_metadata(self):
@@ -130,6 +130,40 @@ class ZarrGroup(ZarrNode):
         sub_node = zarr_group['path/to/node']
 
     """
+
+    @classmethod
+    def create(cls, store: WritableStore, path: str, *, attributes: dict | None = None):
+        """Create a new ZarrGroup in the given store.
+
+        Arguments:
+            store : WritableStore
+                The store to write the group to.
+            path : str
+                The path of the zarr-group in the store.
+            attributes : dict
+                Additional metadata.
+        """
+        # Checks
+        if not isinstance(path, str):  # no-cover
+            raise TypeError(f"ZarrGroup path must be str, got {path!r}")
+        if not (attributes is None or isinstance(attributes, dict)):  # no-cover
+            raise TypeError(
+                f"ZarrGroup attributes must be None or dict, got {attributes!r}"
+            )
+
+        # Build metadata
+        metadata = {
+            "zarr_format": 3,
+            "node_type": "group",
+        }
+        if attributes is not None:
+            metadata["attributes"] = attributes
+
+        # Write
+        json_text = json.dumps(metadata, indent=4)
+        store.set(join(path, "zarr.json"), json_text.encode())
+
+        return cls(store, path, metadata)
 
     def __repr__(self):
         return self.get_structure(max_depth=1)
@@ -213,31 +247,6 @@ class ZarrGroup(ZarrNode):
             else:
                 self._children[name] = node
 
-    @classmethod
-    def create(cls, store: WritableStore, path: str, *, attributes: dict | None = None):
-        """Create a new ZarrGroup in the given store."""
-        # Checks
-        if not isinstance(path, str):  # no-cover
-            raise TypeError(f"ZarrGroup path must be str, got {path!r}")
-        if not (attributes is None or isinstance(attributes, dict)):  # no-cover
-            raise TypeError(
-                f"ZarrGroup attributes must be None or dict, got {attributes!r}"
-            )
-
-        # Build metadata
-        metadata = {
-            "zarr_format": 3,
-            "node_type": "group",
-        }
-        if attributes is not None:
-            metadata["attributes"] = attributes
-
-        # Write
-        json_text = json.dumps(metadata, indent=4)
-        store.set(join(path, "zarr.json"), json_text.encode())
-
-        return cls(store, path, metadata)
-
 
 class ZarrArray(ZarrNode):
     """The class that represents a Zarr array.
@@ -247,6 +256,159 @@ class ZarrArray(ZarrNode):
     ``ZarrArraySlice`` which can be used to get and set the data as numpy
     arrays.
     """
+
+    @classmethod
+    def create(
+        cls,
+        store: WritableStore,
+        path: str,
+        shape: tuple[int, ...],
+        dtype: str,
+        *,
+        fill_value: object = None,
+        chunk_shape: tuple[int, ...] | None = None,
+        chunk_path_separator: str = "/",
+        codecs: list[dict] | None = None,
+        dimension_names: list[str] | None = None,
+        attributes: dict | None = None,
+    ):
+        """Create a new ZarrArray in the given store.
+
+        Arguments:
+            store : WritableStore
+                The store to write the array (json and chunks) to.
+            path : str
+                The path of the zarr-array in the store.
+            shape : tuple[int, ...]
+                The shape of the array.
+            dtype : str
+                The data-type of the array.
+            fill_value
+                The value to fill in when no chunk is present. The type must match the dtype.
+                In most cases None can be provided to mean "zero".
+            chunk_shape : tuple[int]
+                The shape of the chunks, must match the dimensions of ``shape``.
+                If not given or None, there is one chunk with the same shape as the array itself.
+            chunk_path_separator : str
+                The path-separator to use for chunks. Default '/'. Part of the metadata's ``chunk_key_encoding```.
+            codecs : list[dict] | None
+                A list of codecs to encode the array data. If None, uses ZSTD compression with level 7,
+                using ``{"name": "bytes", "configuration": {"endian": "little"}}``
+                and ``{"name": "zstd", "configuration": {"level": 7, "checksum": True}}``.
+            dimension_names : tuple[str]
+                The names of the dimensions. Optional. The number of names must match the legth of the ``shape``.
+            attributes : dict
+                Additional metadata.
+        """
+
+        # Check path
+        if not isinstance(path, str):  # no-cover
+            raise TypeError(f"ZarrArray path must be str, got {path!r}")
+
+        # Check dtype
+        if isinstance(dtype, type) and issubclass(dtype, np.number):
+            dtype = dtype.__name__
+        elif isinstance(dtype, np.dtype):
+            dtype = dtype.name
+        elif not isinstance(dtype, str):  # no-cover
+            raise TypeError(f"ZarrArray dtype must be str, got {dtype!r}")
+        if not (
+            dtype in DTYPES or (dtype.startswith("r") and dtype[1:].isnumeric())
+        ):  # no-cover
+            # Currently ignoring possible dtypes of extensions
+            raise ValueError(f"ZarrArray dtype must be one of {DTYPES}, got {dtype!r}")
+
+        # Check shape
+        ndim = len(shape)
+        shape = tuple(int(i) for i in shape)
+        if ndim < 1:  # no-cover
+            raise ValueError(
+                f"ZarrArray dimensions must be at least 1D, got shape {shape!r}"
+            )
+        if any(i <= 0 for i in shape):  # no-cover
+            raise ValueError(
+                f"ZarrArray dimensions cannot be zero or less, got shape {shape!r}"
+            )
+
+        # Check and resolve chunk_grid
+        if chunk_shape is None:
+            chunk_shape = shape
+        if len(chunk_shape) != ndim:  # no-cover
+            raise ValueError(
+                f"ZarrArray chunk_shape does not match the shape ndim ({ndim}), got {chunk_shape!r}"
+            )
+        if any(i <= 0 for i in chunk_shape):  # no-cover
+            raise ValueError(
+                f"ZarrArray chunk_shape cannot have zero or less dimensions, got {chunk_shape!r}"
+            )
+        chunk_grid = {"name": "regular", "configuration": {"chunk_shape": chunk_shape}}
+
+        # Check and resolve fill_value
+        fill_value = resolve_fill_value(fill_value, dtype)[1]
+
+        # Check and create chunk_key_encoding
+        if chunk_path_separator is None:
+            chunk_path_separator = "/"
+        if not isinstance(chunk_path_separator, str):  # no-cover
+            raise TypeError(
+                f"ZarrArray chunk_path_separator must be str got {chunk_path_separator!r}"
+            )
+        chunk_key_encoding = {
+            "name": "default",
+            "configuration": {"separator": chunk_path_separator},
+        }
+
+        # Check and create codecs
+        if codecs is None:
+            codecs = [
+                {"name": "bytes", "configuration": {"endian": "little"}},
+                {"name": "zstd", "configuration": {"level": 7, "checksum": True}},
+            ]
+        elif not (
+            isinstance(codecs, (tuple, list))
+            and len(codecs) >= 1
+            and all(isinstance(d, dict) and "name" in d for d in codecs)
+        ):
+            raise ValueError(
+                f"ZarrArray codecs must be a list of dicts with at least a field 'name', got {codecs!r}"
+            )
+
+        # Build metadata. The order of the keys matches their order in the spec.
+        metadata = {
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": shape,
+            "data_type": dtype,
+            "chunk_grid": chunk_grid,
+            "chunk_key_encoding": chunk_key_encoding,
+            "fill_value": fill_value,
+            "codecs": codecs,
+        }
+
+        if attributes is not None:
+            if not isinstance(attributes, dict):  # no-cover
+                raise TypeError(
+                    f"ZarrGroup attributes must be None or dict, got {attributes!r}"
+                )
+            metadata["attributes"] = attributes
+
+        storage_transformers = None  # Zarr spec 3.1 does not specify any
+        if storage_transformers is not None:  # no-cover
+            metadata["storage_transformers"] = storage_transformers
+
+        if dimension_names is not None:
+            dimension_names = tuple(str(s) for s in dimension_names)
+            if len(dimension_names) != ndim:  # no-cover
+                raise ValueError(
+                    f"ZarrArray dimension_names must match ndim {ndim}, got {dimension_names!r}"
+                )
+            metadata["dimension_names"] = dimension_names
+
+        # Write
+        json_text = json.dumps(metadata, indent=4)
+        store.set(join(path, "zarr.json"), json_text.encode())
+
+        return cls(store, path, metadata)
 
     def _one_line_repr(self):
         shape_str = "x".join(str(i) for i in self.shape)
@@ -534,156 +696,3 @@ class ZarrArray(ZarrNode):
 
     def _init_node(self):
         pass
-
-    @classmethod
-    def create(
-        cls,
-        store: WritableStore,
-        path: str,
-        shape: tuple[int, ...],
-        dtype: str,
-        *,
-        fill_value: object = None,
-        chunk_shape: tuple[int, ...] | None = None,
-        chunk_path_separator: str = "/",
-        codecs: list[dict] | None = None,
-        dimension_names: list[str] | None = None,
-        attributes: dict | None = None,
-    ):
-        """Create a new ZarrArray in the given store.
-
-        Arguments:
-            store : WritableStore
-                The store to write the array (json and chunks) to.
-            path : str
-                The path of the zarr-array in the store.
-            shape : tuple[int, ...]
-                The shape of the array.
-            dtype : str
-                The data-type of the array.
-            fill_value
-                The value to fill in when no chunk is present. The type must match the dtype.
-                In most cases None can be provided to mean "zero".
-            chunk_shape : tuple[int]
-                The shape of the chunks, must match the dimensions of ``shape``.
-                If not given or None, there is one chunk with the same shape as the array itself.
-            chunk_path_separator : str
-                The path-separator to use for chunks. Default '/'. Part of the metadata's ``chunk_key_encoding```.
-            codecs : list[dict] | None
-                A list of codecs to encode the array data. If None, uses ZSTD compression with level 7,
-                using ``{"name": "bytes", "configuration": {"endian": "little"}}``
-                and ``{"name": "zstd", "configuration": {"level": 7, "checksum": True}}``.
-            dimension_names : tuple[str]
-                The names of the dimensions. Optional. The number of names must match the legth of the ``shape``.
-            attributes : dict
-                Additional metadata.
-        """
-
-        # Check path
-        if not isinstance(path, str):  # no-cover
-            raise TypeError(f"ZarrArray path must be str, got {path!r}")
-
-        # Check dtype
-        if isinstance(dtype, type) and issubclass(dtype, np.number):
-            dtype = dtype.__name__
-        elif isinstance(dtype, np.dtype):
-            dtype = dtype.name
-        elif not isinstance(dtype, str):  # no-cover
-            raise TypeError(f"ZarrArray dtype must be str, got {dtype!r}")
-        if not (
-            dtype in DTYPES or (dtype.startswith("r") and dtype[1:].isnumeric())
-        ):  # no-cover
-            # Currently ignoring possible dtypes of extensions
-            raise ValueError(f"ZarrArray dtype must be one of {DTYPES}, got {dtype!r}")
-
-        # Check shape
-        ndim = len(shape)
-        shape = tuple(int(i) for i in shape)
-        if ndim < 1:  # no-cover
-            raise ValueError(
-                f"ZarrArray dimensions must be at least 1D, got shape {shape!r}"
-            )
-        if any(i <= 0 for i in shape):  # no-cover
-            raise ValueError(
-                f"ZarrArray dimensions cannot be zero or less, got shape {shape!r}"
-            )
-
-        # Check and resolve chunk_grid
-        if chunk_shape is None:
-            chunk_shape = shape
-        if len(chunk_shape) != ndim:  # no-cover
-            raise ValueError(
-                f"ZarrArray chunk_shape does not match the shape ndim ({ndim}), got {chunk_shape!r}"
-            )
-        if any(i <= 0 for i in chunk_shape):  # no-cover
-            raise ValueError(
-                f"ZarrArray chunk_shape cannot have zero or less dimensions, got {chunk_shape!r}"
-            )
-        chunk_grid = {"name": "regular", "configuration": {"chunk_shape": chunk_shape}}
-
-        # Check and resolve fill_value
-        fill_value = resolve_fill_value(fill_value, dtype)[1]
-
-        # Check and create chunk_key_encoding
-        if chunk_path_separator is None:
-            chunk_path_separator = "/"
-        if not isinstance(chunk_path_separator, str):  # no-cover
-            raise TypeError(
-                f"ZarrArray chunk_path_separator must be str got {chunk_path_separator!r}"
-            )
-        chunk_key_encoding = {
-            "name": "default",
-            "configuration": {"separator": chunk_path_separator},
-        }
-
-        # Check and create codecs
-        if codecs is None:
-            codecs = [
-                {"name": "bytes", "configuration": {"endian": "little"}},
-                {"name": "zstd", "configuration": {"level": 7, "checksum": True}},
-            ]
-        elif not (
-            isinstance(codecs, (tuple, list))
-            and len(codecs) >= 1
-            and all(isinstance(d, dict) and "name" in d for d in codecs)
-        ):
-            raise ValueError(
-                f"ZarrArray codecs must be a list of dicts with at least a field 'name', got {codecs!r}"
-            )
-
-        # Build metadata. The order of the keys matches their order in the spec.
-        metadata = {
-            "zarr_format": 3,
-            "node_type": "array",
-            "shape": shape,
-            "data_type": dtype,
-            "chunk_grid": chunk_grid,
-            "chunk_key_encoding": chunk_key_encoding,
-            "fill_value": fill_value,
-            "codecs": codecs,
-        }
-
-        if attributes is not None:
-            if not isinstance(attributes, dict):  # no-cover
-                raise TypeError(
-                    f"ZarrGroup attributes must be None or dict, got {attributes!r}"
-                )
-            metadata["attributes"] = attributes
-
-        storage_transformers = None  # Zarr spec 3.1 does not specify any
-        if storage_transformers is not None:  # no-cover
-            metadata["storage_transformers"] = storage_transformers
-
-        if dimension_names is not None:
-            dimension_names = tuple(str(s) for s in dimension_names)
-            if len(dimension_names) != ndim:  # no-cover
-                raise ValueError(
-                    f"ZarrArray dimension_names must match ndim {ndim}, got {dimension_names!r}"
-                )
-            metadata["dimension_names"] = dimension_names
-
-        # Write
-        json_text = json.dumps(metadata, indent=4)
-        store.set(join(path, "zarr.json"), json_text.encode())
-
-        return cls(store, path, metadata)
