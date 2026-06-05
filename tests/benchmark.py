@@ -76,7 +76,7 @@ def read_chunks_zarrpy():
             for y in range(grid_shape[2]):
                 for x in range(grid_shape[3]):
                     chunk = arr.blocks[c, z, y, x]
-                    assert isinstance(chunk, np.array)
+                    assert isinstance(chunk, np.ndarray)
                     # assert chunk.shape == a.chunk_shape
 
 
