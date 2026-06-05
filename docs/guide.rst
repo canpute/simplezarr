@@ -114,6 +114,22 @@ Read and write individual chunks
     [f1.result(), f2.result()]
 
 
+Creating Zarr files
+-------------------
+
+.. code-block:: py
+
+    store = simplezarr.MemoryStore()
+
+    simplezarr.ZarrGroup.create(store, "")
+
+    arr = simplezarr.ZarrArray.create(store, "array1", (1000, 1000), "uint16", chunk_shape=(64, 64))
+    arr[...].set_now(42)
+
+    arr = simplezarr.ZarrArray.create(store, "array2", (100, 100, 100), "float32", chunk_shape=(10, 10, 10))
+    arr[5:-5, 5:-5, 5:-5].set_now(1.0)
+
+
 More functionality
 ------------------
 
