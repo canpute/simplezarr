@@ -12,6 +12,7 @@ from simplezarr.stores import check_key, check_prefix
 from simplezarr.stores import MemoryStore, LocalStore, WrapperStore
 
 import pytest
+import numpy as np
 
 
 List = list
@@ -48,27 +49,29 @@ class StoreThatFillsTheGaps:
     def __init__(self):
         self._store = STORE.copy()
 
-    def get(self, key: str) -> bytes:
+    def _get(self, key: str) -> bytes:
         try:
             return self._store[key]
         except KeyError:
             raise IOError(f"get(): key {key!r} does not exist.") from None
 
-    def set(self, key: str, value: bytes):
+    def _set(self, key: str, value: bytes):
         dir = ""
         for d in key.split("/")[:-1]:
             dir += f"{d}/"
             if dir[:-1] in self._store:
                 raise IOError(f"Cannot set {key!r} because {dir[:-1]!r} exists.")
+        if not isinstance(value, bytes):
+            value = value.tobytes()
         self._store[key] = value
 
-    def erase(self, key: str):
+    def _erase(self, key: str):
         try:
             self._store.pop(key)
         except KeyError:
             raise IOError(f"erase(): key {key!r} does not exist.") from None
 
-    def list(self) -> list[str]:
+    def _list(self) -> list[str]:
         return sorted(self._store.keys())
 
 
@@ -77,9 +80,9 @@ class ReadableStoreTestable(StoreThatFillsTheGaps, ReadableStore):
 
 
 class WritableStoreTestable(StoreThatFillsTheGaps, WritableStore):
-    def list_prefix(self, prefix: str) -> List[str]:
+    def _list_prefix(self, prefix: str) -> List[str]:
         prefix = "" if prefix == "/" else prefix  # Special case
-        return [key for key in self.list() if key.startswith(prefix)]
+        return [key for key in self._list() if key.startswith(prefix)]
 
 
 class ListableStoreTestable(StoreThatFillsTheGaps, ListableStore):
@@ -195,19 +198,39 @@ def test_write(cls):
     store.set("spam", b"hi spam")
     store.set("dir3/sub/spam", b"hi spam")
 
+    mem1 = memoryview(b"012345")
+    mem2 = mem1[::2]  # not contiguous
+    store.set("spam2", mem1)
+    store.set("spam3", mem2)
+
+    with pytest.raises(TypeError):
+        store.set("spam4", [b"cannot_write_a_list"])
+    with pytest.raises(TypeError):
+        store.set("spam4", np.array([1, 2, 3]))
+
     if True:  # isinstance(store, ReadableStore):
-        assert store.get("spam") == b"hi spam"
-        assert store.get("dir3/sub/spam") == b"hi spam"
+        assert store._get("spam") == b"hi spam"
+        assert store._get("dir3/sub/spam") == b"hi spam"
+        assert store._get("spam2") == b"012345"
+        assert store._get("spam3") == b"024"
     if True:  # isinstance(store, ListableStore):
-        assert "spam" in store.list()
-        assert "dir3/sub/spam" in store.list()
+        assert "spam" in store._list()
+        assert "dir3/sub/spam" in store._list()
 
     store.set_partial_values([("foo", 1, b"a-")])
     if True:  # isinstance(store, ReadableStore):
-        assert store.get("foo") == b"ha-foo"
+        assert store._get("foo") == b"ha-foo"
 
+    store.set_partial_values([("foo", 3, mem2)])
+    if True:  # isinstance(store, ReadableStore):
+        assert store._get("foo") == b"ha-024"
+
+    with pytest.raises(TypeError):
+        store.set_partial_values([("spam", 1, b"a-", 0)])
     with pytest.raises(IOError):
         store.set_partial_values([("doesnotexist", 1, b"a-")])
+    with pytest.raises(TypeError):
+        store.set_partial_values([("spam", 1, "not-bytes")])
 
     # Cannot create a dir for a file with that name
     with pytest.raises(IOError):
@@ -219,12 +242,12 @@ def test_write(cls):
 
     store.erase("foo")
     with pytest.raises(IOError):
-        store.get("foo")
+        store._get("foo")
     store.set("foo/eggs", b"hi eggs")
 
     store.erase("dir2/sub/bar")
     with pytest.raises(IOError):
-        store.get("dir2/sub/bar")
+        store._get("dir2/sub/bar")
     store.set("dir2/sub/bar/eggs", b"hi eggs")
 
     with pytest.raises(IOError):
@@ -235,8 +258,8 @@ def test_write(cls):
     # Erase values
 
     store.erase_values(["bar", "dir1/bar"])
-    assert "bar" not in store.list()
-    assert "dir1/bar" not in store.list()
+    assert "bar" not in store._list()
+    assert "dir1/bar" not in store._list()
 
     with pytest.raises(IOError):
         store.erase_values(["doesnotexist"])
@@ -245,15 +268,36 @@ def test_write(cls):
 
     store.erase_prefix("dir2/")
     store.erase_prefix("dir3/")
-    assert store.list() == ["dir1/foo", "foo/eggs", "spam"]
+    assert store._list() == ["dir1/foo", "foo/eggs", "spam", "spam2", "spam3"]
 
     store.erase_prefix("foo/")
-    assert store.list() == ["dir1/foo", "spam"]
+    assert store._list() == ["dir1/foo", "spam", "spam2", "spam3"]
 
     store.erase_prefix("/")
-    assert store.list() == []
+    assert store._list() == []
 
     store.erase_prefix("doesnotexist/")  # This is fine
+
+
+def test_memory_store():
+    store = MemoryStoreTestable()
+    assert isinstance(store.dict, dict)
+    assert store.dict == STORE
+    assert store.nbytes > 10
+    store.dict.clear()
+    assert store.nbytes == 0
+
+
+def test_local_store():
+    store = LocalStoreTestable()
+    assert isinstance(store.path, Path)
+    assert "test-data" in str(store.path)
+    assert "test-data" in repr(store)
+
+
+def test_wrapper_store():
+    store = WrapperStoreTestable()
+    assert isinstance(store.sub, BaseStore)
 
 
 # %%%%% More specific tests
@@ -345,6 +389,10 @@ if __name__ == "__main__":
                 else:
                     print("done")
         print("all done")
+
+        test_memory_store()
+        test_local_store()
+        test_wrapper_store()
 
         test_meta()
         test_check_key()
