@@ -228,6 +228,140 @@ def test_zarr_array2():
     assert np.all(chunk5 == 0.0)  # fill value
 
 
+def test_zarr_getting_and_setting_chunks_basic():
+    s = MemoryStore()
+
+    arr = ZarrArray.create(s, "", (100, 100), np.float32, chunk_shape=(10, 10))
+
+    # The array is initially 'empty'
+
+    a = arr.get_chunk_now((0, 0))
+    assert np.all(a == 0)
+
+    a = arr.get_chunk_now((0, 0), none_if_missing=True)
+    assert a is None
+
+    # Set the first chunk
+
+    arr.set_chunk_now((0, 0), np.ones((10, 10), np.float32))
+
+    a = arr.get_chunk_now((0, 0))
+    assert np.all(a == 1)
+
+    # Set the next two chunks, with and without empty-check
+
+    arr.set_chunk_now((0, 1), np.zeros((10, 10), np.float32))
+    arr.set_chunk_now((0, 2), np.zeros((10, 10), np.float32), check_empty=False)
+
+    a = arr.get_chunk_now((0, 1))
+    assert np.all(a == 0)
+
+    a = arr.get_chunk_now((0, 2))
+    assert np.all(a == 0)
+
+    a = arr.get_chunk_now((0, 1), True)
+    assert a is None
+
+    a = arr.get_chunk_now((0, 2), True)
+    assert a is not None  # the all-zero chunk IS actually stored
+
+
+def test_zarr_getting_and_setting_chunks_fails():
+    s = MemoryStore()
+
+    arr = ZarrArray.create(s, "", (100, 100), np.float32, chunk_shape=(10, 10))
+
+    a = np.ones((10, 10), np.float32)
+
+    # This works
+
+    arr.set_chunk_now((0, 0), a)
+
+    a2 = arr.get_chunk_now((0, 0))
+    assert np.all(a2 == 1)
+
+    # Let's check some invalid ways to set a chunk
+
+    with pytest.raises(TypeError):
+        arr.set_chunk_now(0, a)
+    with pytest.raises(TypeError):
+        arr.set_chunk_now([0, 0], a)
+
+    with pytest.raises(IndexError):
+        arr.set_chunk_now((0,), a)
+    with pytest.raises(IndexError):
+        arr.set_chunk_now((0, 0, 0), a)
+
+    with pytest.raises(IndexError):
+        arr.set_chunk_now((0.0, 0), a)
+    with pytest.raises(IndexError):
+        arr.set_chunk_now((-1, 0), a)
+
+    with pytest.raises(TypeError):
+        arr.set_chunk_now((0, 0), b"not an array")
+    with pytest.raises(ValueError):
+        arr.set_chunk_now((0, 0), a.astype(np.float64))
+    with pytest.raises(ValueError):
+        arr.set_chunk_now((0, 0), a.astype(np.int32))
+    with pytest.raises(ValueError):
+        arr.set_chunk_now((0, 0), a[1:, 1:])
+    with pytest.raises(ValueError):
+        arr.set_chunk_now((0, 0), a.reshape(100, 1))
+
+    # Let's check some invalid ways to get a chunk
+
+    with pytest.raises(TypeError):
+        arr.get_chunk_now(0)
+    with pytest.raises(TypeError):
+        arr.get_chunk_now([0, 0])
+
+    with pytest.raises(IndexError):
+        arr.get_chunk_now((0,))
+    with pytest.raises(IndexError):
+        arr.get_chunk_now((0, 0, 0))
+
+    with pytest.raises(IndexError):
+        arr.get_chunk_now((0.0, 0))
+    with pytest.raises(IndexError):
+        arr.get_chunk_now((-1, 0))
+
+
+def test_zarr_getting_and_setting_chunks_parallel():
+    s = MemoryStore()
+
+    arr = ZarrArray.create(s, "", (100, 100), np.float32, chunk_shape=(10, 10))
+
+    # Write
+    promises = []
+    values = []
+    for y in range(10):
+        for x in range(10):
+            val = y * 10 + x
+            a = np.full((10, 10), val, np.float32)
+            p = arr.set_chunk_soon((y, x), a)
+            promises.append(p)
+            values.append(val)
+
+    # Wait
+    import concurrent
+
+    concurrent.futures.wait(promises)
+    for p in promises:
+        p.result()
+
+    # Read
+    promises = []
+    for y in range(10):
+        for x in range(10):
+            p = arr.get_chunk_soon((y, x))
+            promises.append(p)
+
+    # Wait and check
+    for p, val in zip(promises, values, strict=True):
+        a = p.result()
+        assert np.all(a == val)
+
+
 def test_zarr_replicate_hardcoded_store():
     # Use .create() to replicate the hardcoded store at the top of the module
 
