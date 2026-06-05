@@ -20,15 +20,15 @@ __all__ = [
 ]
 
 
-def open_zarr(store: ReadableStore) -> ZarrNode:
-    """Open a zarr file using the given store.
+def open_zarr(store: ReadableStore, path: str = "") -> ZarrNode:
+    """Open a zarr file using the given store and path.
 
     Zarr files are made up of a tree of nodes. Each node is either a
     ``ZarrGroup`` or a ``ZarrArray``. The arrays are the leaf nodes. When
     opening a Zarr file, it may be a single array, or a group containing
     multiple arrays.
     """
-    return ZarrNode._from_path(store, "")
+    return ZarrNode._from_path(store, path)
 
 
 def join(*path_parts):
