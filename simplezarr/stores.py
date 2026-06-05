@@ -175,6 +175,8 @@ class WritableStore(BaseStore):
     def set(self, key: str, value: bytes) -> None:
         """Store a (key, value) pair."""
         check_key(self, "set", key)
+        if not isinstance(value, (bytes, memoryview)):
+            raise TypeError("Store data should be bytes or memoryview.")
         return self._set(key, value)
 
     def _set(self, key: str, value: bytes):
@@ -188,6 +190,8 @@ class WritableStore(BaseStore):
         for key_start_value in key_start_values:
             key, start, value = check_key_start_value(self, key_start_value)
             check_key(self, "set_partial_values", key)
+            if not isinstance(value, (bytes, memoryview)):
+                raise TypeError("Store data should be bytes or memoryview.")
             start = int(start)
             key_start_values2.append((key, start, value))
         self._set_partial_values(key_start_values2)
@@ -196,7 +200,9 @@ class WritableStore(BaseStore):
         # Default implementation, using .get()
         for key, i1, value in key_start_values:
             i2 = i1 + len(value)
-            full_value = self.get(key)
+            full_value = self._get(key)
+            if not isinstance(value, bytes):
+                value = value.tobytes()
             full_value = full_value[:i1] + value + full_value[i2:]
             self.set(key, full_value)
 
@@ -229,8 +235,8 @@ class WritableStore(BaseStore):
         return self._erase_prefix(prefix)
 
     def _erase_prefix(self, prefix: str):
-        # Default implementation, using .list_prefix()
-        for key in self.list_prefix(prefix):
+        # Default implementation, using ._list_prefix()
+        for key in self._list_prefix(prefix):
             self.erase(key)
 
 
@@ -261,9 +267,9 @@ class ListableStore(BaseStore):
         return self._list_prefix(prefix)
 
     def _list_prefix(self, prefix: str) -> List[str]:
-        # Default implementation, using .list()
+        # Default implementation, using ._list()
         prefix = "" if prefix == "/" else prefix  # Special case
-        return [key for key in self.list() if key.startswith(prefix)]
+        return [key for key in self._list() if key.startswith(prefix)]
 
     def list_dir(self, prefix: str) -> List[str]:
         """Retrieve all keys within a given directory.
@@ -282,11 +288,11 @@ class ListableStore(BaseStore):
         return self._list_dir(prefix)
 
     def _list_dir(self, prefix: str) -> List[str]:
-        # Default implementation, using .list()
+        # Default implementation, using ._list()
         prefix = "" if prefix == "/" else prefix  # Special case
         n = len(prefix)
         keys = set()
-        for key in self.list():
+        for key in self._list():
             if key.startswith(prefix):
                 key, dash, _rest = key[n:].partition("/")
                 keys.add(prefix + key + dash)
@@ -300,14 +306,24 @@ class MemoryStore(ReadableStore, WritableStore, ListableStore):
     """Implementation of a readable, writable and listable store, based on an in-memory dict."""
 
     def __init__(self, fields: dict | None = None):
-        self._store = {}
+        self._dict = {}
         if fields:
             for k, v in fields.items():
                 self.set(k, v)
 
+    @property
+    def dict(self):
+        """The internal dictionary that contains the data for this store."""
+        return self._dict
+
+    @property
+    def nbytes(self):
+        """The total number of bytes stored in this store."""
+        return sum(len(x) for x in self._dict.values())
+
     def _get(self, key: str) -> bytes:
         try:
-            return self._store[key]
+            return self._dict[key]
         except KeyError:
             raise IOError(f"get(): key {key!r} does not exist.") from None
 
@@ -315,18 +331,20 @@ class MemoryStore(ReadableStore, WritableStore, ListableStore):
         dir = ""
         for d in key.split("/")[:-1]:
             dir += f"{d}/"
-            if dir[:-1] in self._store:
+            if dir[:-1] in self._dict:
                 raise IOError(f"Cannot set {key!r} because {dir[:-1]!r} exists.")
-        self._store[key] = value
+        if not isinstance(value, bytes):  # only store as bytes
+            value = value.tobytes()
+        self._dict[key] = value
 
     def _erase(self, key: str):
         try:
-            self._store.pop(key)
+            self._dict.pop(key)
         except KeyError:
             raise IOError(f"erase(): key {key!r} does not exist.") from None
 
     def _list(self) -> list[str]:
-        return sorted(self._store.keys())
+        return sorted(self._dict.keys())
 
 
 class LocalStore(ReadableStore, WritableStore, ListableStore):
@@ -340,6 +358,11 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
 
     def __repr__(self):
         return f"<LocalStore '{self._path}' at {hex(id(self))}>"
+
+    @property
+    def path(self) -> Path:
+        """The path on the local filesystem that represents the root of this store."""
+        return self._path
 
     def _get(self, key: str) -> bytes:
         p = self._path.joinpath(*key.split("/"))
@@ -364,12 +387,16 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
     def _set(self, key: str, value: bytes):
         p = self._path.joinpath(*key.split("/"))
         p.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(value, memoryview) and not value.c_contiguous:
+            value = value.tobytes()
         p.write_bytes(value)
 
     def _set_partial_values(self, key_start_values: List[tuple[str, int, bytes]]):
         for key, start, value in key_start_values:
             p = self._path.joinpath(*key.split("/"))
             p.parent.mkdir(parents=False, exist_ok=True)
+            if isinstance(value, memoryview) and not value.c_contiguous:
+                value = value.tobytes()
             with p.open("r+b") as f:
                 f.seek(start)
                 f.write(value)
@@ -418,61 +445,66 @@ class WrapperStore(ReadableStore, WritableStore, ListableStore):
     """
 
     def __init__(self, store: ReadableStore | WritableStore | ListableStore):
-        self._store = store
+        self._sub = store
+
+    @property
+    def sub(self):
+        """The sub-store for this wrapper store."""
+        return self._sub
 
     def _hook(self, method, args, result):
         """The hook that gets called on each API call."""
         pass
 
     def _get(self, key: str) -> bytes:
-        result = self._store.get(key)
+        result = self._sub.get(key)
         self._hook("get", (key,), result)
         return result
 
     def _get_partial_values(
         self, key_ranges: List[tuple[str, int, int | None]]
     ) -> list[bytes]:
-        result = self._store._get_partial_values(key_ranges)
+        result = self._sub._get_partial_values(key_ranges)
         self._hook("get_partial_values", (key_ranges,), result)
         return result
 
     def _set(self, key: str, value: bytes):
-        result = self._store._set(key, value)
+        result = self._sub._set(key, value)
         self._hook("set", (key, value), result)
         return result
 
     def _set_partial_values(self, key_start_values: List[tuple[str, int, bytes]]):
-        result = self._store._set_partial_values(key_start_values)
+        result = self._sub._set_partial_values(key_start_values)
         self._hook("set_partial_values", (key_start_values,), result)
         return result
 
     def _erase(self, key: str):
-        result = self._store._erase(key)
+        result = self._sub._erase(key)
         self._hook("erase", (key,), result)
         return result
 
     def _erase_values(self, keys: List[str]):
-        result = self._store._erase_values(keys)
+        result = self._sub._erase_values(keys)
         self._hook("erase_values", (keys,), result)
         return result
 
     def _erase_prefix(self, prefix: str):
-        result = self._store._erase_prefix(prefix)
+        result = self._sub._erase_prefix(prefix)
         self._hook("erase_prefix", (prefix), result)
         return result
 
     def _list(self) -> list[str]:
-        result = self._store._list()
+        result = self._sub._list()
         self._hook("list", (), result)
         return result
 
     def _list_prefix(self, prefix: str) -> list[str]:
-        result = self._store._list_prefix(prefix)
+        result = self._sub._list_prefix(prefix)
         self._hook("list_prefix", (prefix,), result)
         return result
 
     def _list_dir(self, prefix: str) -> list[str]:
-        result = self._store._list_dir(prefix)
+        result = self._sub._list_dir(prefix)
         self._hook("list_dir", (prefix,), result)
         return result
 
