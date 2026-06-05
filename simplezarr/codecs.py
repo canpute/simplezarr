@@ -33,6 +33,8 @@ import numpy as np
 
 __all__ = ["create_ndarray_type", "decode_bytes", "encode_array"]
 
+# EXTENSION_POINT: codecs -> codecs can be added here as well as by 3d party code
+
 CODEC_CLASS_BY_NAME = {}
 
 
@@ -170,7 +172,9 @@ def resolve_codecs_from_dicts(
         try:
             cls = CODEC_CLASS_BY_NAME[name]
         except KeyError:
-            raise TypeError(f"Unknown Zarr codec {name}") from None
+            raise RuntimeError(
+                f"Zarr codec extension {name!r} is not supported."
+            ) from None
         codecs.append(cls(**configuration))
 
     # Resolve types
