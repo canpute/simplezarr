@@ -465,7 +465,6 @@ class ZarrArray(ZarrNode):
         # EXTENSION_POINT: codecs
         self._codecs = meta["codecs"]
         assert len(self._codecs) >= 1
-        assert self._codecs[0]["name"] == "bytes"  # TODO: check elsewgere
 
         # Parse optional fields
 
