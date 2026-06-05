@@ -136,7 +136,7 @@ def test_resolve_codecs_from_dicts_other_errors():
         {"name": "doesnotexist", "configuration": {}},
         {"name": "gzip", "configuration": {"level": 6}},
     ]
-    with pytest.raises(TypeError):
+    with pytest.raises(RuntimeError):
         resolve_codecs_from_dicts(d, array_type)
 
 

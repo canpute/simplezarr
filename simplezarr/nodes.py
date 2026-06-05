@@ -307,6 +307,7 @@ class ZarrArray(ZarrNode):
             raise TypeError(f"ZarrArray path must be str, got {path!r}")
 
         # Check dtype
+        # EXTENSION_POINT: dtype (and fill_value)
         if isinstance(dtype, type) and issubclass(dtype, np.number):
             dtype = dtype.__name__
         elif isinstance(dtype, np.dtype):
@@ -329,7 +330,11 @@ class ZarrArray(ZarrNode):
                 f"ZarrArray dimensions cannot be zero or less, got shape {shape!r}"
             )
 
+        # Check and resolve fill_value
+        fill_value = resolve_fill_value(fill_value, dtype)[1]
+
         # Check and resolve chunk_grid
+        # EXTENSION_POINT: chunk_grid
         if chunk_shape is None:
             chunk_shape = shape
         if len(chunk_shape) != ndim:
@@ -342,10 +347,8 @@ class ZarrArray(ZarrNode):
             )
         chunk_grid = {"name": "regular", "configuration": {"chunk_shape": chunk_shape}}
 
-        # Check and resolve fill_value
-        fill_value = resolve_fill_value(fill_value, dtype)[1]
-
         # Check and create chunk_key_encoding
+        # EXTENSION_POINT: chunk_key_encoding
         if chunk_path_separator is None:
             chunk_path_separator = "/"
         if not isinstance(chunk_path_separator, str):
@@ -358,6 +361,7 @@ class ZarrArray(ZarrNode):
         }
 
         # Check and create codecs
+        # EXTENSION_POINT: codecs
         if codecs is None:
             codecs = [
                 {"name": "bytes", "configuration": {"endian": "little"}},
@@ -391,8 +395,9 @@ class ZarrArray(ZarrNode):
                 )
             metadata["attributes"] = attributes
 
-        storage_transformers = None  # Zarr spec 3.1 does not specify any
-        if storage_transformers is not None:  # no-cover
+        # EXTENSION_POINT: storage_transformers
+        storage_transformers = []  # Zarr spec 3.1 does not specify any
+        if storage_transformers:  # no-cover
             metadata["storage_transformers"] = storage_transformers
 
         if dimension_names is not None:
@@ -416,16 +421,29 @@ class ZarrArray(ZarrNode):
 
         assert meta["node_type"] == "array"
 
+        # Shape
         self._shape = tuple(int(i) for i in meta["shape"])
-        self._dtype = dtype = meta["data_type"]
 
+        # EXTENSION_POINT: dtype (and fill_value)
+        self._dtype = dtype = meta["data_type"]
+        assert isinstance(dtype, str)
+        if not (
+            dtype in DTYPES or (dtype.startswith("r") and dtype[1:].isnumeric())
+        ):  # no-cover
+            raise RuntimeError("Zarr dtype extension {dtype!r} is not supported.")
         i = len(dtype)
         while i > 0 and dtype[i - 1].isdigit():
             i -= 1
         self._dtype_bits = int(dtype[i:]) if i < len(dtype) else 8
 
+        # Fill value
+        self._fill_value = resolve_fill_value(meta["fill_value"], self._dtype)[0]
+
+        # EXTENSION_POINT: chunk_grid
         self._chunk_grid = meta["chunk_grid"]
-        assert self._chunk_grid["name"] == "regular"
+        name = self._chunk_grid["name"]
+        if name != "regular":  # no-cover
+            raise RuntimeError("Zarr chunk_grid extension {name!r} is not supported.")
         self._chunk_shape = tuple(self._chunk_grid["configuration"]["chunk_shape"])
 
         self._chunk_grid_shape = tuple(
@@ -433,22 +451,33 @@ class ZarrArray(ZarrNode):
             for array_s, chunk_s in zip(self._shape, self._chunk_shape, strict=True)
         )
 
+        # EXTENSION_POINT: chunk_key_encoding
         self._chunk_key_encoding = meta["chunk_key_encoding"]
-        assert self._chunk_key_encoding["name"] == "default"
+        name = self._chunk_key_encoding["name"]
+        if name != "default":  # no-cover
+            raise RuntimeError(
+                "Zarr chunk_key_encoding extension {name!r} is not supported."
+            )
         self._chunk_path_separator = self._chunk_key_encoding["configuration"][
             "separator"
         ]
 
-        self._fill_value = resolve_fill_value(meta["fill_value"], self._dtype)[0]
-
+        # EXTENSION_POINT: codecs
         self._codecs = meta["codecs"]
         assert len(self._codecs) >= 1
-        assert self._codecs[0]["name"] == "bytes"
+        assert self._codecs[0]["name"] == "bytes"  # TODO: check elsewgere
 
         # Parse optional fields
 
         self._attributes = meta.get("attributes", None)
-        self._storage_transformers = meta.get("storage_transformers", None)
+
+        # EXTENSION_POINT: storage_transformers
+        self._storage_transformers = meta.get("storage_transformers", [])
+        if self._storage_transformers:  # no-cover
+            raise RuntimeError(
+                "No storage_transformers extensions are currently supported."
+            )
+
         self._dimension_names = meta.get("dimension_names", None)
 
     def _init_node(self):
