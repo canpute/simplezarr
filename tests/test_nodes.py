@@ -112,7 +112,7 @@ def test_zarr_group():
 
     # Could in theory also instantiate it directly
     minimal_metadata = {"zarr_format": 3, "node_type": "group"}
-    g2 = ZarrGroup(store, "", minimal_metadata)
+    _g2 = ZarrGroup(store, "", minimal_metadata)
 
     # But these fail
     with pytest.raises(TypeError):
@@ -402,7 +402,7 @@ def test_zarr_create_fails():
         ZarrArray.create(s, "array", (100, 100), "notknown")
 
     with pytest.raises(ValueError):
-        ZarrArray.create(s, "array", (100,100), "float32", chunk_shape=(10,))
+        ZarrArray.create(s, "array", (100, 100), "float32", chunk_shape=(10,))
     with pytest.raises(ValueError):
         ZarrArray.create(s, "array", (100, 100), "float32", chunk_shape=(10, -10))
 
