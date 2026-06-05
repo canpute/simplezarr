@@ -27,3 +27,22 @@ class ZarrFuture(Future):
     def __repr__(self):
         r = super().__repr__()
         return r.replace(" at ", f" for {self._for} at ")
+
+
+# Define all possible dtypes for a Zarr array. Note that 'rx' (with x a multiple of 8) is also allowed.
+DTYPES = (
+    "bool",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "float16",
+    "float32",
+    "float64",
+    "complex64",
+    "complex128",
+)

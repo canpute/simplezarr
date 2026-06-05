@@ -33,7 +33,7 @@ store_data = {
                     "endian": "little"
                 }
             }],
-            "fill_value": "0.0"
+            "fill_value": "0"
         }
         """.encode(),
     "c/0/0": np.full((10, 7), 100, np.uint8).tobytes(),
