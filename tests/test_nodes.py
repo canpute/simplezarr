@@ -138,7 +138,7 @@ def test_zarr_group():
     assert isinstance(sub, ZarrGroup)
 
     # Alt, directly via store
-    sub2 = open_zarr(store, 'sub')
+    sub2 = open_zarr(store, "sub")
     assert sub.store is sub2.store
     assert sub.path == sub2.path
 
@@ -351,7 +351,6 @@ def test_zarr_getting_and_setting_chunks_fails():
         arr.get_chunk_now((-1, 0))
     with pytest.raises(IndexError):
         arr.get_chunk_now((0, -1))
-
 
 
 def test_zarr_getting_and_setting_chunks_parallel():
