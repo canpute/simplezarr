@@ -1,13 +1,29 @@
 """
 Support for multiscale images, most notably ome-zarr.
 
-The purpose of this utility is to examine the metadata of a Zarr file and produce
-typed structures to easily process the data further.
+The purpose of this utility is to examine the metadata of a Zarr file and
+produce typed structures to easily process the data further.
 
 OME-Zarr, a.k.a. next-generation file format (NGFF) builds on Zarr version 3, to
 define hierarchical datasets. This module implements the "multiscales" metadata,
 ignoring the transitional "bioformats2raw.layout" and "omero" metadata. In its
 current form, the "labels", "plate" and "well" metadata are also ignored.
+
+A note on coordinate systems: in versions 0.4 and 0.5 of the ome-zarr spec, it
+was undefined whether (in the absence of a transform) the pixel-corner or the
+pixel-center should be at the origin in world coordinates. The (upcoming) 0.6
+spec defines the pixel-center as the origin of the data coordinate frame.
+This is also the convention of the ``simplezarr.utils.multiscale`` module. In practice this means that:
+
+* When a writer (e.g. ome-zarr-py) omits translations, we assume that it intends
+  to place the pixel corner of each layer at the origin, and the
+  ``spatial_offset`` is set to half the scale to make this so.
+* Code that consumes the ``ScaleInfo`` objects, should scale the image, then put the top-left pixel
+  at the origin, and then apply the spatial_offset.
+* In PyGfx, Image and Volume objects are already placed with their top-left pixel at
+  the origin, independent from their scale. This means that one can simply do:
+  ``ob.local.scale = si.spatial_scale`` and ``ob.local.position = si.spatial_offset``.
+
 """
 
 from __future__ import annotations
@@ -167,7 +183,7 @@ def create_scale_infos_from_ome_zarr_group(
         units = [d.get("unit", "").lower() for d in axes_info[-space_dims:]]
         units = [unit for unit in units if unit]
         unit = "" if not units else units[-1]
-        if unit not in SPACE_UNITS:  # no-cover
+        if unit and unit not in SPACE_UNITS:  # no-cover
             raise TypeError(f"{MSG_PREFIX}: unexpected space unit: {unit!r}")
         elif not unit:  # no-cover
             logger.warning(f"{MSG_PREFIX}: spatial dimensions don't not have a unit.")
@@ -197,29 +213,29 @@ def create_scale_infos_from_ome_zarr_group(
         scale_infos = []
         for level, dataset_dict in enumerate(datasets):
             path = dataset_dict["path"]  # MUST field
-            transforms = {
-                t["type"]: t[t["type"]]
-                for t in dataset_dict["coordinateTransformations"]  # MUST field
-            }
+            transforms = {}
+            for t in dataset_dict["coordinateTransformations"]:  # MUST field
+                tp = t["type"]
+                if tp in ("scale", "translation"):
+                    transforms[tp] = t[tp]
             zarr_array = zarr_group[path]
             # scale_dict = zarr_info["consolidated_metadata"]["metadata"][dataset_dict["path"]]
             # shape = scale_dict["shape"]
-            full_scale = transforms.get("scale", [1] * len(axes_types))
-            full_translation = transforms.get("translation", [0] * len(axes_types))
-            for global_type, global_value in global_transforms.items():
-                if global_type == "scale":
-                    full_scale = [
-                        s1 * s2 for s1, s2 in zip(full_scale, global_value, strict=True)
-                    ]
-                    full_translation = [
-                        t1 * s2
-                        for t1, s2 in zip(full_translation, global_value, strict=True)
-                    ]
-                elif global_type == "translation":
-                    full_translation = [
-                        t1 + t2
-                        for t1, t2 in zip(full_translation, global_value, strict=True)
-                    ]
+
+            # Get local transform.
+            # If no translation is provided, we assume that the writer intended to put
+            # the top-left pixel corner of each level at the origin. Also see https://github.com/ome/ngff/issues/89
+            default_scale = [1] * len(axes_types)
+            local_scale = transforms.get("scale", default_scale)
+            default_translation = [0] * len(local_scale)
+            for i in range(len(local_scale) - space_dims, len(local_scale)):
+                default_translation[i] = local_scale[i] / 2
+            local_translation = transforms.get("translation", default_translation)
+
+            # Compose with global
+            full_scale, full_translation = _apply_transforms(
+                local_scale, local_translation, global_transforms
+            )
 
             spatial_scale = tuple(full_scale[-space_dims:])
             mean_scale = sum(spatial_scale) / len(spatial_scale)
@@ -253,3 +269,18 @@ def create_scale_infos_from_ome_zarr_group(
         )
 
     return multiscale_images
+
+
+def _apply_transforms(scale, translation, transforms):
+    """Apply additional (gloabal) transforms to the scale and translation."""
+    for global_type, global_value in transforms.items():
+        if global_type == "scale":
+            scale = [s1 * s2 for s1, s2 in zip(scale, global_value, strict=True)]
+            translation = [
+                t1 * s2 for t1, s2 in zip(translation, global_value, strict=True)
+            ]
+        elif global_type == "translation":
+            translation = [
+                t1 + t2 for t1, t2 in zip(translation, global_value, strict=True)
+            ]
+    return scale, translation
