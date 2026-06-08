@@ -168,7 +168,7 @@ def resolve_codecs_from_dicts(
     codecs = []
     for codec_dict in codec_dicts:
         name = codec_dict["name"]
-        configuration = codec_dict["configuration"]
+        configuration = codec_dict.get("configuration", {})
         try:
             cls = CODEC_CLASS_BY_NAME[name]
         except KeyError:
