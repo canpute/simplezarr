@@ -452,6 +452,20 @@ def test_chunk_selection():
         arr.chunks[0, ::2]
 
 
+def test_empty_slice():
+    # This would hang at some point, because the aggregate future is
+    # never finished, because no chunks are actually read or written.
+
+    store = MemoryStore()
+
+    arr = ZarrArray.create(store, "", (100, 100), "uint16")
+    sub = arr[:, 20:20]
+    a = sub.get_now()
+    assert a.shape == (100, 0)
+
+    sub.set_now(a)
+
+
 if __name__ == "__main__":
     for func in list(globals().values()):
         if callable(func) and func.__name__.startswith("test_"):
