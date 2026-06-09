@@ -584,17 +584,18 @@ class ZarrArray(ZarrNode):
         """
 
         # Check index
-        if not isinstance(index, tuple):
+        ndim = self.ndim
+        if not (isinstance(index, tuple) and all(isinstance(i, int) for i in index)):
             raise TypeError(
-                f"ZarrArray.get_chunk_now() needs a tuple index, got {index!r}"
+                f"ZarrArray.get_chunk_now() needs index to be a tuple of ints, got {index!r}"
             )
-        if len(index) != len(self._shape):
+        if len(index) != ndim:
             raise IndexError(
-                f"ZarrArray.get_chunk_now() needs {len(self._shape)} indices."
+                f"ZarrArray.get_chunk_now() needs ndim ({ndim}) indices, got {len(index)}"
             )
-        if not all(isinstance(i, int) and i >= 0 for i in index):
+        if not all(0 <= index[i] < self._chunk_grid_shape[i] for i in range(ndim)):
             raise IndexError(
-                "ZarrArray.get_chunk_now() needs positive integer indices."
+                "ZarrArray.get_chunk_now() index is not within the chunk grid."
             )
 
         # Load data. This could take a while if it's a remote/slow store
@@ -663,17 +664,16 @@ class ZarrArray(ZarrNode):
         """
 
         # Check index
-        if not isinstance(index, tuple):
+        ndim = self.ndim
+        if not (isinstance(index, tuple) and all(isinstance(i, int) for i in index)):
             raise TypeError(
-                f"ZarrArray.set_chunk_now() needs a tuple index, got {index!r}"
+                f"ZarrArray.set_chunk_now() needs index to be a tuple of ints, got {index!r}"
             )
-        if len(index) != len(self._shape):
+        if len(index) != ndim:
+            raise IndexError(f"ZarrArray.set_chunk_now() needs ndim ({ndim}) indices.")
+        if not all(0 <= index[i] < self._chunk_grid_shape[i] for i in range(ndim)):
             raise IndexError(
-                f"ZarrArray.set_chunk_now() needs {len(self._shape)} indices."
-            )
-        if not all(isinstance(i, int) and i >= 0 for i in index):
-            raise IndexError(
-                "ZarrArray.set_chunk_now() needs positive integer indices."
+                "ZarrArray.set_chunk_now() index is not within the chunk grid."
             )
 
         # Check data

@@ -137,6 +137,11 @@ def test_zarr_group():
     sub = g["sub"]
     assert isinstance(sub, ZarrGroup)
 
+    # Alt, directly via store
+    sub2 = open_zarr(store, "sub")
+    assert sub.store is sub2.store
+    assert sub.path == sub2.path
+
     # This fails
     with pytest.raises(TypeError):
         g[0]
@@ -230,13 +235,6 @@ def test_zarr_array2():
     assert chunk4.dtype == np.float32
     assert np.all(chunk4 == 4.0)
 
-    # Out of range
-    chunk5 = a2.get_chunk_now((9, 0))
-    assert isinstance(chunk5, np.ndarray)
-    assert chunk5.shape == (50, 50)
-    assert chunk5.dtype == np.float32
-    assert np.all(chunk5 == 0.0)  # fill value
-
 
 def test_zarr_getting_and_setting_chunks_basic():
     s = MemoryStore()
@@ -292,21 +290,31 @@ def test_zarr_getting_and_setting_chunks_fails():
 
     # Let's check some invalid ways to set a chunk
 
+    # Types
     with pytest.raises(TypeError):
         arr.set_chunk_now(0, a)
     with pytest.raises(TypeError):
         arr.set_chunk_now([0, 0], a)
+    with pytest.raises(TypeError):
+        arr.set_chunk_now((0.0, 0), a)
 
+    # ndim
     with pytest.raises(IndexError):
         arr.set_chunk_now((0,), a)
     with pytest.raises(IndexError):
         arr.set_chunk_now((0, 0, 0), a)
 
+    # Out of range
     with pytest.raises(IndexError):
-        arr.set_chunk_now((0.0, 0), a)
+        arr.set_chunk_now((10, 0), a)
+    with pytest.raises(IndexError):
+        arr.set_chunk_now((0, 10), a)
     with pytest.raises(IndexError):
         arr.set_chunk_now((-1, 0), a)
+    with pytest.raises(IndexError):
+        arr.set_chunk_now((0, -1), a)
 
+    # array being set
     with pytest.raises(TypeError):
         arr.set_chunk_now((0, 0), b"not an array")
     with pytest.raises(ValueError):
@@ -320,20 +328,29 @@ def test_zarr_getting_and_setting_chunks_fails():
 
     # Let's check some invalid ways to get a chunk
 
+    # Types
     with pytest.raises(TypeError):
         arr.get_chunk_now(0)
     with pytest.raises(TypeError):
         arr.get_chunk_now([0, 0])
+    with pytest.raises(TypeError):
+        arr.get_chunk_now((0.0, 0))
 
+    # ndim
     with pytest.raises(IndexError):
         arr.get_chunk_now((0,))
     with pytest.raises(IndexError):
         arr.get_chunk_now((0, 0, 0))
 
+    # Out of range
     with pytest.raises(IndexError):
-        arr.get_chunk_now((0.0, 0))
+        arr.get_chunk_now((10, 0))
+    with pytest.raises(IndexError):
+        arr.get_chunk_now((0, 10))
     with pytest.raises(IndexError):
         arr.get_chunk_now((-1, 0))
+    with pytest.raises(IndexError):
+        arr.get_chunk_now((0, -1))
 
 
 def test_zarr_getting_and_setting_chunks_parallel():
