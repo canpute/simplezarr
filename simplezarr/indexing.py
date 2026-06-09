@@ -142,6 +142,7 @@ class ZarrArraySlice:
                 chunk_index_info.chunk_slices,
             )
 
+        aggregator.check()
         return aggregate_future
 
     def get_now(self) -> np.ndarray:
@@ -190,6 +191,7 @@ class ZarrArraySlice:
                 chunk_index_info.chunk_slices,
             )
 
+        aggregator.check()
         return aggregate_future
 
     def set_now(self, value: np.ndarray) -> None:
@@ -214,6 +216,9 @@ class Aggregator:
 
     def finish(self, chunk_index: tuple[int, ...]):
         self._chunk_indices.discard(chunk_index)
+        self.check()
+
+    def check(self):
         if not self._chunk_indices and self._future is not None:
             self._future.set_result(self._result)
             self._future = None
