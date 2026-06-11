@@ -320,10 +320,10 @@ def test_scale_infos_from_zarr_node_transforms():
 
 
 def test_scale_infos_default_offset():
-    # If the translation is omitted, we assume the writer meant to align
-    # the pixel cornders, and we use half-the-scale as offset, so that
-    # things work out correctly when using pixel-centers as a reference
-    # (as god intended).
+    # If the translation is omitted, we assume the writer means to
+    # auto-align, or the writer meant to align by pixel-corners and we
+    # convert to pixel-center because that's what downstream code will
+    # assume. We default to offset ``scale / 2 - scale0 / 2`` to make this work.
 
     temp_store_data = store_data2.copy()
 
@@ -337,17 +337,17 @@ def test_scale_infos_default_offset():
 
     # scale 0
     si = info.scales[0]
-    assert si.spatial_offset == (0.5, 0.5)
+    assert si.spatial_offset == (0.0, 0.0)
     assert si.spatial_scale == (1, 1)
 
     # scale 1
     si = info.scales[1]
-    assert si.spatial_offset == (1, 1)
+    assert si.spatial_offset == (0.5, 0.5)  # 2 / 2 - 1 / 2
     assert si.spatial_scale == (2, 2)
 
     # scale 3
     si = info.scales[2]
-    assert si.spatial_offset == (2, 2)
+    assert si.spatial_offset == (1.5, 1.5)  # 4 / 2 - 1 / 2
     assert si.spatial_scale == (4, 4)
 
 
