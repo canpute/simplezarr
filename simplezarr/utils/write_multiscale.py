@@ -88,13 +88,13 @@ def write_ome_zarr_pyramid(
             s, "", numpy_array.shape, numpy_array.dtype
         )
         src_array[...].set_now(numpy_array)
-    if not (
-        isinstance(src_array, simplezarr.ZarrArray)
-        and src_array.ndim >= 2
-        and src_array.ndim <= 5
-    ):
+    if not isinstance(src_array, simplezarr.ZarrArray):
         raise TypeError(
-            f"write_ome_zarr() Expected an array with 2, 3, 4 or 5 dimensions, got {src_array.__class__.__name__} {src_array}"
+            f"write_ome_zarr() Expected an array, got {src_array.__class__.__name__} {src_array}"
+        )
+    if   not (src_array.ndim >= 2 and src_array.ndim <= 5):
+        raise ValueError(
+            f"write_ome_zarr() Expected an array with 2, 3, 4 or 5 dimensions, got shape {src_array.shape}"
         )
 
     ndim = src_array.ndim
