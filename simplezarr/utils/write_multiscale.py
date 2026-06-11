@@ -254,8 +254,8 @@ def write_ome_zarr_pyramid(
     # Write toplevel ZarrGroup for this pyramid
     zarr_group = simplezarr.ZarrGroup.create(store, path, attributes=attributes)
 
-    # _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method)
-    _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape)
+    _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method)
+    # _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape)
 
     return zarr_group
 
@@ -336,7 +336,7 @@ def _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape):
         # The zyx_slices are the slice in the full array, we reduce it in the loop below
         src_data = src_array[*tc_slices, *zyx_slices].get_now()
         src_slices = tuple(
-            slice(zyx_slices[i].start, min(zyx_slices[i].stop, src_array.shape[i]), 1)
+            slice(zyx_slices[i].start, min(zyx_slices[i].stop, src_zyx_shape[i]), 1)
             for i in range(zyx_ndim)
         )
 
@@ -350,7 +350,8 @@ def _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape):
                 new_slices = tuple(
                     slice(s.start // 2, s.stop // 4 * 2, 1) for s in slices
                 )
-                new_zyx_shape = tuple(data.shape[i] // 4 * 2 for i in range(zyx_ndim))
+                xyz_shape = data.shape[-zyx_ndim:]
+                new_zyx_shape = tuple(xyz_shape[i] // 4 * 2 for i in range(zyx_ndim))
                 new_shape = (*tc_shape, *new_zyx_shape)
                 new_data = np.zeros(new_shape, data.dtype)
                 subslices2 = tuple(slice(0, s // 2 * 2, 1) for s in new_zyx_shape)
