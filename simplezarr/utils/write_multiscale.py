@@ -92,7 +92,7 @@ def write_ome_zarr_pyramid(
         raise TypeError(
             f"write_ome_zarr() Expected an array, got {src_array.__class__.__name__} {src_array}"
         )
-    if   not (src_array.ndim >= 2 and src_array.ndim <= 5):
+    if not (src_array.ndim >= 2 and src_array.ndim <= 5):
         raise ValueError(
             f"write_ome_zarr() Expected an array with 2, 3, 4 or 5 dimensions, got shape {src_array.shape}"
         )
@@ -243,7 +243,10 @@ def write_ome_zarr_pyramid(
             "path": array_path,
             "coordinateTransformations": [
                 {"type": "scale", "scale": (*tc_scale, *zyx_scale)},
-                # {"type": "translation", "translation": (*tc_translation, *zyx_translation)}
+                {
+                    "type": "translation",
+                    "translation": (*tc_translation, *zyx_translation),
+                },
             ],
         }
         dataset_list.append(d)
