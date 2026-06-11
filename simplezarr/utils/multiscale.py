@@ -1,6 +1,9 @@
 """
 Support for multiscale images, most notably ome-zarr.
 
+Purpose and limitations
+-----------------------
+
 The purpose of this utility is to examine the metadata of a Zarr file and
 produce typed structures to easily process the data further.
 
@@ -9,20 +12,58 @@ define hierarchical datasets. This module implements the "multiscales" metadata,
 ignoring the transitional "bioformats2raw.layout" and "omero" metadata. In its
 current form, the "labels", "plate" and "well" metadata are also ignored.
 
-A note on coordinate systems: in versions 0.4 and 0.5 of the ome-zarr spec, it
-was undefined whether (in the absence of a transform) the pixel-corner or the
-pixel-center should be at the origin in world coordinates. The (upcoming) 0.6
-spec defines the pixel-center as the origin of the data coordinate frame.
-This is also the convention of the ``simplezarr.utils.multiscale`` module. In practice this means that:
+Coordinate system
+------------------
 
-* When a writer (e.g. ome-zarr-py) omits translations, we assume that it intends
-  to place the pixel corner of each layer at the origin, and the
-  ``spatial_offset`` is set to half the scale to make this so.
-* Code that consumes the ``ScaleInfo`` objects, should scale the image, then put the top-left pixel
-  at the origin, and then apply the spatial_offset.
-* In PyGfx, Image and Volume objects are already placed with their top-left pixel at
-  the origin, independent from their scale. This means that one can simply do:
-  ``ob.local.scale = si.spatial_scale`` and ``ob.local.position = si.spatial_offset``.
+The ``simplezarr.utils.multiscale`` module follows the convention that the the
+pixel-center of the top-left pixel is at the origin of the data coordinate
+frame, and that without a translation, the top-left pixel's center is at the
+origin in world space::
+
+          origin
+          |
+       _______ _______ _______ _______
+      |___o___|___o___|___o___|___o___|
+
+In the ome-zarr spec, this is explicitly defined in the (upcoming) 0.6 spec, and
+it also seems the unwritten consensus for earlier versions of the spec.
+
+Most pyramids create new layers by somehow combining each 2 (or more) pixels::
+
+          |
+       _______ _______ _______ _______
+      |___o___|___o___|___o___|___o___|   level 0
+       _______________ _______________
+      |_______o_______|_______o_______|   level 1
+       _______________________________
+      |_______________o_______________|   level 2
+
+One can see, that to align the different layers, they need a translation of
+``scale / 2 - scale_at_level_0 / 2``. However, some ome-zarr writers omit the
+translation data. This can mean one of three things:
+
+* They meant "align the layers as one might expect".
+* They follow the convention that the pixel-corners are at the origin instead.
+* They actually meant a zero translation, e.g. because each layer is sampled at
+  the location of the pixel centers in the previous layer.
+
+It's not obvious what the best solution is to deal with missing translations
+(see https://github.com/ome/ngff/issues/89). In this module, we assume its
+either the first reason or the second reason (and we chose to transform to
+pixel-center convention). We consider the third reason much less likely, but it
+mean we may interpret some datasets wrong. If you write ome-zarr pyramids,
+please write translations so we don't have to guess.
+
+In practice this means that:
+
+* If translations are not present, we use ``scale / 2 - scale_at_level_0 / 2``
+  as a default.
+* Code that consumes the ``ScaleInfo`` objects, should scale the image, then put
+  the top-left pixel's center at the origin, and then apply the spatial_offset.
+* In PyGfx, Image and Volume objects are placed with their top-left pixel's
+  center at the origin, independent from their scale. This means that one can
+  simply do: ``ob.local.scale = si.spatial_scale`` and ``ob.local.position =
+  si.spatial_offset``.
 
 """
 
@@ -208,6 +249,9 @@ def create_scale_infos_from_ome_zarr_group(
 
         datasets = multiscale_dict["datasets"]  # MUST field
 
+        default_scale = [1.0] * len(axes_types)
+        local_scale_zero = default_scale  # set when processing level 0
+
         # Collect scale info for each resolution
         # MUST be ordered from largest (i.e. highest resolution) to smallest.
         scale_infos = []
@@ -223,13 +267,18 @@ def create_scale_infos_from_ome_zarr_group(
             # shape = scale_dict["shape"]
 
             # Get local transform.
-            # If no translation is provided, we assume that the writer intended to put
-            # the top-left pixel corner of each level at the origin. Also see https://github.com/ome/ngff/issues/89
-            default_scale = [1] * len(axes_types)
+            # If no translation is provided, we assume that writers intend to put the
+            # center of the top-left pixel at the origin, that the pixel centers are in
+            # between the pixel centers of the previous layer, and that the writer means
+            # to align the different layers appropriately, rather than a zero offset.
+            # So we use ``translation = scale / 2 - scale_zero / 2`` as a default.
+            # Also see https://github.com/ome/ngff/issues/89
             local_scale = transforms.get("scale", default_scale)
-            default_translation = [0] * len(local_scale)
+            if level == 0:
+                local_scale_zero = local_scale
+            default_translation = [0] * len(axes_types)
             for i in range(len(local_scale) - space_dims, len(local_scale)):
-                default_translation[i] = local_scale[i] / 2
+                default_translation[i] = local_scale[i] / 2 - local_scale_zero[i] / 2
             local_translation = transforms.get("translation", default_translation)
 
             # Compose with global
