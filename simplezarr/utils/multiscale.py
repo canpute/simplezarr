@@ -1,5 +1,5 @@
 """
-Support for multiscale images, most notably ome-zarr.
+Support for reading multiscale images, most notably ome-zarr.
 
 Purpose and limitations
 -----------------------
