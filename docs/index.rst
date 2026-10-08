@@ -10,6 +10,7 @@ Welcome to the simplezarr docs!
     guide
     api
     utils
+    extent
 
 
 Indices and tables

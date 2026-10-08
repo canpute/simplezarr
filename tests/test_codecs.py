@@ -10,10 +10,8 @@ import numpy as np
 
 
 def test_create_ndarray_type():
-    create_ndarray_type = codecsmod.create_ndarray_type
-
-    cls1 = create_ndarray_type((2, 3), "uint16")
-    cls2 = create_ndarray_type((3, 2), "uint16")
+    cls1 = codecsmod.ArrayType.create((2, 3), "uint16")
+    cls2 = codecsmod.ArrayType.create((3, 2), "uint16")
 
     assert isinstance(cls1, type) and issubclass(cls1, np.ndarray)
     assert isinstance(cls2, type) and issubclass(cls2, np.ndarray)
@@ -39,7 +37,7 @@ def test_is_byte_like():
 
 def test_resolve_codecs_from_dicts():
     resolve_codecs_from_dicts = codecsmod.resolve_codecs_from_dicts
-    array_type = codecsmod.create_ndarray_type((10, 10), "uint16")
+    array_type = codecsmod.ArrayType.create((10, 10), "uint16")
 
     # Simplest case
     d = [
@@ -79,7 +77,7 @@ def test_resolve_codecs_from_dicts():
 
 def test_resolve_codecs_from_dicts_order_errors():
     resolve_codecs_from_dicts = codecsmod.resolve_codecs_from_dicts
-    array_type = codecsmod.create_ndarray_type((10, 10), "uint16")
+    array_type = codecsmod.ArrayType.create((10, 10), "uint16")
 
     # Fail: no codecs
     d = []
@@ -128,7 +126,7 @@ def test_resolve_codecs_from_dicts_order_errors():
 
 def test_resolve_codecs_from_dicts_other_errors():
     resolve_codecs_from_dicts = codecsmod.resolve_codecs_from_dicts
-    array_type = codecsmod.create_ndarray_type((10, 10), "uint16")
+    array_type = codecsmod.ArrayType.create((10, 10), "uint16")
 
     # Fail: codecs does not exist
     d = [
@@ -153,7 +151,7 @@ def test_encode_decode_round_trip():
     ]
 
     image = np.random.uniform(0, 128, (640, 480)).astype(np.uint8) * 2
-    array_type = codecsmod.create_ndarray_type(image.shape, image.dtype.name)
+    array_type = codecsmod.ArrayType.create(image.shape, image.dtype.name)
 
     # First some type checking
     with pytest.raises(TypeError):
@@ -183,7 +181,7 @@ def test_custom_codec():
     @codecsmod.register_codec
     class MyCodec1(codecsmod.BaseCodec):
         name = "test_mycodec1"
-        _type = "a->a"
+        kind = "a->a"
 
         def encode(self, value):
             return value + 1
@@ -197,7 +195,7 @@ def test_custom_codec():
     ]
 
     image = np.random.uniform(0, 128, (640, 480)).astype(np.uint8) * 2
-    array_type = codecsmod.create_ndarray_type(image.shape, image.dtype.name)
+    array_type = codecsmod.ArrayType.create(image.shape, image.dtype.name)
 
     bb = codecsmod.encode_array(image, d)
     image2 = codecsmod.decode_bytes(bb, d, array_type)
@@ -221,7 +219,7 @@ def test_transpose_codec():
     TransposeCodec = codecsmod.TransposeCodec
 
     arr0 = np.random.uniform(0, 128, (12, 14, 16)).astype(np.uint8) * 2
-    array_type = codecsmod.create_ndarray_type(arr0.shape, arr0.dtype.name)
+    array_type = codecsmod.ArrayType.create(arr0.shape, arr0.dtype.name)
 
     # Type resolving
     type = TransposeCodec().compute_encoded_representation_type(array_type)
@@ -259,7 +257,7 @@ def test_bytes_codec():
     BytesCodec = codecsmod.BytesCodec
 
     arr0 = np.array([0, 1, 2, 3, 1000, 1001, 1002, 1003]).astype(np.uint16)
-    array_type = codecsmod.create_ndarray_type(arr0.shape, "uint16")
+    array_type = codecsmod.ArrayType.create(arr0.shape, "uint16")
 
     c = BytesCodec()
     mem1 = c.encode(arr0)
