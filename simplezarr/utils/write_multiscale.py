@@ -44,7 +44,7 @@ def write_ome_zarr_pyramid(
     fill_value: object = None,
     chunk_path_separator: str | None = None,
     codecs: list[dict] | None = None,
-    _algorithm: str = "simple",
+    _algorithm: str = "auto",
 ):
     """
     Write an ome-zarr image pyramid to the given store.
@@ -275,7 +275,10 @@ def write_ome_zarr_pyramid(
     # Write toplevel ZarrGroup for this pyramid
     zarr_group = simplezarr.ZarrGroup.create(store, path, attributes=attributes)
 
-    if _algorithm == "simple":
+    if _algorithm == "auto":
+        # Could do more sophisticated selection :)
+        _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape)
+    elif _algorithm == "simple":
         _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method)
     elif _algorithm == "depthfirst":
         _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape)
@@ -291,10 +294,11 @@ def _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method):
     tc_shape = src_array.shape[:-zyx_ndim]
     inner_indices = _get_inner_indices(tc_shape)
 
-    src_zyx_shape = src_array.shape[-zyx_ndim:]
-    src_slices = tuple(slice(0, s, 1) for s in src_zyx_shape)
+    # src_zyx_shape = src_array.shape[-zyx_ndim:]
+    # src_slices = tuple(slice(0, s, 1) for s in src_zyx_shape)
     src_data = data = src_array[...].get_now()
 
+    futures = []
     for level, new_array in enumerate(new_arrays):
         if level == 0:
             new_data = src_data
@@ -310,15 +314,18 @@ def _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method):
 
         # Write
         fut = new_array[...].set_soon(new_data)
-        # TODO:we could not-wait for the writing, and wait for futures at the end
-        fut.result()
+        futures.append(fut)
 
         # Next
         data = new_data
 
+    # Wait for all writing to finish
+    for fut in futures:
+        fut.result()
+
 
 def _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape):
-    """Dept-first algorithm to create a pyramid, so it can handle data of any size without running out of memory."""
+    """Depth-first algorithm to create a pyramid, so it can handle data of any size without running out of memory."""
 
     tc_shape = src_array.shape[:-zyx_ndim]
     inner_indices = _get_inner_indices(tc_shape)
@@ -330,6 +337,7 @@ def _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape):
     zyx_chunk_shape = chunk_shape[-zyx_ndim:]
 
     # Determine pyramid-building steps
+    # The more levels per step, the more efficient this becomes, but also the more memory this takes
     levels_per_step = 3
     chunk_multiply_factor = 2**levels_per_step
 
@@ -356,11 +364,13 @@ def _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape):
                     )
                     zyx_slices_list.append(slices)
 
-    print(f"Source array's shape is {src_array.shape}, spatially {src_zyx_shape}")
-    print(f"Identified {len(zyx_slices_list)} initial pyramid building steps")
+    # print(f"Source array's shape is {src_array.shape}, spatially {src_zyx_shape}")
+    # print(f"Identified {len(zyx_slices_list)} initial pyramid building steps")
 
-    for step_index, zyx_slices in enumerate(zyx_slices_list):
-        print(f"Step {step_index}/{len(zyx_slices_list)}")
+    futures = []
+
+    for _step_index, zyx_slices in enumerate(zyx_slices_list):
+        # print(f"Step {step_index}/{len(zyx_slices_list)}")
 
         # The zyx_slices are the slice in the full array, we reduce it in the loop below
         src_data = data = src_array[*tc_slices, *zyx_slices].get_now()
@@ -368,6 +378,7 @@ def _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape):
             slice(zyx_slices[i].start, min(zyx_slices[i].stop, src_zyx_shape[i]), 1)
             for i in range(zyx_ndim)
         )
+
 
         for level, new_array in enumerate(new_arrays):
             # Downscale
@@ -390,12 +401,21 @@ def _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape):
 
             # Write
             fut = new_array[*tc_slices, *new_slices].set_soon(new_data)
-            # TODO:we could not-wait for the writing, and wait for futures at the end
-            fut.result()
+
+            # Until we process whole chunks, we can wait for the write to finish later.
+            # When our writes are mid-chunk, we cannot.
+            if level < levels_per_step:
+                futures.append(fut)
+            else:
+                fut.result()
 
             # Next
             data = new_data
             slices = new_slices
+
+    # Wait for this step to finish writing
+    for fut in futures:
+        fut.result()
 
 
 def _get_inner_indices(tc_shape):
