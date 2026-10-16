@@ -1,7 +1,7 @@
 """
-Support for writing multiscale images, a.ka. ome-zarr pyramids.
+Support for writing multiscale images, a.k.a. ome-zarr pyramids.
 
-Supports huge datasets by building the pyramid up in pieces. But adopts a depth-first approach and makes use of parallel writes to realize fast throughput.
+Supports huge datasets by building the pyramid up in pieces. Has fast throughput by adopting a depth-first approach and makes use of parallel writes.
 
 Currently it seems to be about 4 times faster than ome-zarr, but we have not applied all tricks yet.
 
@@ -22,6 +22,7 @@ Examples:
 """
 
 import numpy as np
+
 import simplezarr
 from simplezarr.utils.units import SPACE_UNITS, TIME_UNITS
 
@@ -33,15 +34,17 @@ def write_ome_zarr_pyramid(
     axes: tuple[str],
     *,
     name: str = "",
+    nlevels: int = 0,
+    # pyramid attributes (in ome metadata, not available on src_array)
     space_unit: str = "",
     base_scale: float | tuple[float, ...] = 1.0,
-    nlevels: int = 0,
     # args that inherit from src array, but can be overriden
     chunk_shape: tuple[int] | None = None,
     dtype: str | None = None,
     fill_value: object = None,
     chunk_path_separator: str | None = None,
     codecs: list[dict] | None = None,
+    _algorithm: str = "simple",
 ):
     """
     Write an ome-zarr image pyramid to the given store.
@@ -55,29 +58,27 @@ def write_ome_zarr_pyramid(
             The source array. An array of 2, 3, 4 or 5 dimensions (t, c, z, y, x).
         axes : str
             The names of the dimensions, e.g. "xyz" or "cyx", with "t" for time,
-            "c" for channels, and "zyx" for the spatial dimensions.
+            "c" for channels, and "zyx" for the spatial dimensions. Must match the array's ndim.
         name : str
             The name for the multi-scale image. Default empty string.
-        space_unit : str
-            The spatial unit. Default empty string which means not set.
-        base_scale : float or tuple[float]
-            The scale of the original data (scale 0). Default 1.
         nlevels : int
             The number of scale levels to create. If zero, determine automatically
             so that the highest level is <= chunk shape.
+        space_unit : str
+            The spatial unit, default empty string for not-set.
+        base_scale : float or tuple[float]
+            The scale of the original data (at level 0), default 1.0.
         chunk_shape : int or tuple[int]
-            The chunk_shape for all levels in the new array.
+            The chunk_shape for all levels in the new array. If not given, use the src_array's chunk_shape.
         dtype : str
-            The data type of the new array. If not given, uses the array's dtype.
+            The data type of the new array. If not given, uses the src_array's dtype.
         fill_value
-            The value to fill in when no chunk is present. If not given, uses the array's fill_value.
+            The value to fill in when no chunk is present. If not given, uses the src_array's fill_value.
         chunk_path_separator : str
-            The path-separator to use for chunks. If not given, uses the array's chunk_path_separator.
+            The path-separator to use for chunks. If not given, uses the src_array's chunk_path_separator.
         codecs : list[dict] | None
-            Same as ``ZarrArray.create()``. If not given, uses the array's chunk_path_separator.
+            Same as ``ZarrArray.create()``. If not given, uses the src_array's codecs.
     """
-
-    # TODO: base_scale should use src_array's scale by default
 
     # Allow numpy array input -> convert to an in-memory ZarrArray
     numpy_array = None
@@ -111,6 +112,8 @@ def write_ome_zarr_pyramid(
         raise ValueError(f"write_ome_zarr() unexpected axes {axes!r}.")
     if not isinstance(name, str):
         raise TypeError(f"write_ome_zarr() name must be str, got {name!r}")
+
+    space_unit = str(space_unit)
 
     if isinstance(base_scale, float):
         base_scale = tuple(1.0 if a in "tc" else base_scale for a in axes)
@@ -149,29 +152,47 @@ def write_ome_zarr_pyramid(
 
     # Overloadable from source array
     if chunk_shape is None:
+        if not isinstance(src_array, simplezarr.ZarrArray):
+            raise ValueError(
+                "chunk_shape can only be omitted if the source array is a ZarrArray."
+            )
         chunk_shape = src_array.chunk_shape
         zyx_chunk_shape = chunk_shape[-zyx_ndim:]
     elif isinstance(chunk_shape, int):
         zyx_chunk_shape = (chunk_shape,) * chunk_shape
         chunk_shape = (*src_array.shape[:-zyx_ndim], *zyx_chunk_shape)
     else:
-        assert len(chunk_shape) == ndim
-        assert all(isinstance(i, int) for i in chunk_shape)
+        if len(chunk_shape) != ndim:
+            raise ValueError("chunk_shape does not match ndim")
+        if not all(isinstance(i, int) for i in chunk_shape):
+            raise ValueError("chunk_shape must be a tuple of ints")
         zyx_chunk_shape = chunk_shape[-zyx_ndim:]
     if dtype is None:
         dtype = src_array.dtype
     if fill_value is None:
+        if not isinstance(src_array, simplezarr.ZarrArray):
+            raise ValueError(
+                "fill_value can only be omitted if the source array is a ZarrArray."
+            )
         fill_value = src_array._fill_value
     if chunk_path_separator is None:
+        if not isinstance(src_array, simplezarr.ZarrArray):
+            raise ValueError(
+                "chunk_path_separator can only be omitted if the source array is a ZarrArray."
+            )
         chunk_path_separator = src_array._chunk_path_separator
     if codecs is None:
+        if not isinstance(src_array, simplezarr.ZarrArray):
+            raise ValueError(
+                "codecs can only be omitted if the source array is a ZarrArray."
+            )
         codecs = src_array._codecs
 
     # Select downsample method
     method = "local_mean"  # our API enum, also ends up as 'type' in metadata
     if method not in {"local_mean"}:
         raise ValueError(f"write_ome_zarr() unexpected method {method!r}")
-    dowmsample_metadata = {
+    downsample_metadata = {
         "description": f"Pyramid build with simplezarr.utils.pyramid using the {method!r} method"
     }
 
@@ -188,7 +209,7 @@ def write_ome_zarr_pyramid(
                     "axes": axes_list,
                     "datasets": dataset_list,
                     "type": method,
-                    "metadata": dowmsample_metadata,
+                    "metadata": downsample_metadata,
                 }
             ],
         }
@@ -216,7 +237,7 @@ def write_ome_zarr_pyramid(
             zyx_scale = tuple(s * 2 for s in zyx_scale)
         # Decide when to stop
         if nlevels == 0:
-            if level >= 1 and any(
+            if level >= 1 and all(
                 zyx_shape[i] < zyx_chunk_shape[i] for i in range(zyx_ndim)
             ):
                 break
@@ -254,19 +275,25 @@ def write_ome_zarr_pyramid(
     # Write toplevel ZarrGroup for this pyramid
     zarr_group = simplezarr.ZarrGroup.create(store, path, attributes=attributes)
 
-    _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method)
-    # _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape)
+    if _algorithm == "simple":
+        _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method)
+    elif _algorithm == "depthfirst":
+        _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape)
+    else:
+        raise RuntimeError(f"Invalid algorithm {_algorithm}")
 
     return zarr_group
 
 
 def _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method):
+    """Straightforward algorithm to create a pyramid."""
+
     tc_shape = src_array.shape[:-zyx_ndim]
     inner_indices = _get_inner_indices(tc_shape)
 
     src_zyx_shape = src_array.shape[-zyx_ndim:]
-    src_slices = tuple(slice(0, s // 2 * 2, 1) for s in src_zyx_shape)
-    src_data = src_array[...].get_now()
+    src_slices = tuple(slice(0, s, 1) for s in src_zyx_shape)
+    src_data = data = src_array[...].get_now()
 
     for level, new_array in enumerate(new_arrays):
         if level == 0:
@@ -274,7 +301,7 @@ def _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method):
         else:
             new_data = np.zeros(new_array.shape, new_array.dtype)
             new_zyx_shape = new_data.shape[-zyx_ndim:]
-            subslices2 = tuple(slice(0, s // 2 * 2, 1) for s in new_zyx_shape)
+            subslices2 = tuple(slice(0, s, 1) for s in new_zyx_shape)
             subslices1 = tuple(slice(0, s.stop * 2, 1) for s in subslices2)
             for index in inner_indices:  # for each time/channel combi
                 new_data[*index, *subslices2] = _downsample(
@@ -291,12 +318,14 @@ def _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method):
 
 
 def _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape):
+    """Dept-first algorithm to create a pyramid, so it can handle data of any size without running out of memory."""
+
     tc_shape = src_array.shape[:-zyx_ndim]
     inner_indices = _get_inner_indices(tc_shape)
     tc_slices = [slice(None) for _ in tc_shape]
 
     src_zyx_shape = src_array.shape[-zyx_ndim:]
-    src_slices = tuple(slice(0, s // 2 * 2, 1) for s in src_zyx_shape)
+    src_slices = tuple(slice(0, s, 1) for s in src_zyx_shape)
 
     zyx_chunk_shape = chunk_shape[-zyx_ndim:]
 
@@ -334,7 +363,7 @@ def _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape):
         print(f"Step {step_index}/{len(zyx_slices_list)}")
 
         # The zyx_slices are the slice in the full array, we reduce it in the loop below
-        src_data = src_array[*tc_slices, *zyx_slices].get_now()
+        src_data = data = src_array[*tc_slices, *zyx_slices].get_now()
         src_slices = tuple(
             slice(zyx_slices[i].start, min(zyx_slices[i].stop, src_zyx_shape[i]), 1)
             for i in range(zyx_ndim)
@@ -347,14 +376,12 @@ def _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape):
                 new_data = src_data
                 new_slices = src_slices
             else:
-                new_slices = tuple(
-                    slice(s.start // 2, s.stop // 4 * 2, 1) for s in slices
-                )
+                new_slices = tuple(slice(s.start // 2, s.stop // 2, 1) for s in slices)
                 xyz_shape = data.shape[-zyx_ndim:]
-                new_zyx_shape = tuple(xyz_shape[i] // 4 * 2 for i in range(zyx_ndim))
+                new_zyx_shape = tuple(xyz_shape[i] // 2 for i in range(zyx_ndim))
                 new_shape = (*tc_shape, *new_zyx_shape)
                 new_data = np.zeros(new_shape, data.dtype)
-                subslices2 = tuple(slice(0, s // 2 * 2, 1) for s in new_zyx_shape)
+                subslices2 = tuple(slice(0, s, 1) for s in new_zyx_shape)
                 subslices1 = tuple(slice(0, s.stop * 2, 1) for s in subslices2)
                 for index in inner_indices:  # for each time/channel combi
                     new_data[*index, *subslices2] = _downsample(
