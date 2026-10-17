@@ -148,7 +148,7 @@ def write_ome_zarr_pyramid(
         axes_list.append(d)
 
     zyx_ndim = sum(1 for a in axes if a in "xyz")
-    tc_ndim = ndim - zyx_ndim
+    _tc_ndim = ndim - zyx_ndim
 
     # Overloadable from source array
     if chunk_shape is None:
@@ -230,15 +230,20 @@ def write_ome_zarr_pyramid(
     new_arrays = []
     zyx_shape = src_zyx_shape
     zyx_scale = src_zyx_scale
+    prev_zyx_shape = zyx_shape
 
     for level in range(100):
         if level > 0:
+            prev_zyx_shape = zyx_shape
             zyx_shape = tuple(s // 2 for s in zyx_shape)
             zyx_scale = tuple(s * 2 for s in zyx_scale)
         # Decide when to stop
         if nlevels == 0:
-            if level >= 1 and all(
-                zyx_shape[i] < zyx_chunk_shape[i] for i in range(zyx_ndim)
+            # Stop when the last level fits in a single chunk,
+            # or when we cannot halve the shape any further.
+            if level >= 1 and (
+                all(prev_zyx_shape[i] <= zyx_chunk_shape[i] for i in range(zyx_ndim))
+                or any(s == 0 for s in zyx_shape)
             ):
                 break
         elif level >= nlevels:
@@ -378,7 +383,6 @@ def _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape):
             slice(zyx_slices[i].start, min(zyx_slices[i].stop, src_zyx_shape[i]), 1)
             for i in range(zyx_ndim)
         )
-
 
         for level, new_array in enumerate(new_arrays):
             # Downscale
