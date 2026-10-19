@@ -466,6 +466,54 @@ def test_empty_slice():
     sub.set_now(a)
 
 
+def test_partial_chunk1():
+
+    # Spec: Chunks at the border of an array always have the full chunk size, even when the array only covers parts of it.
+
+    store = MemoryStore()
+
+    arr = ZarrArray.create(
+        store, "", (10, 10), "uint16", chunk_shape=(16, 16), fill_value=7
+    )
+    assert arr.chunk_grid_shape == (1, 1)
+
+    arr[...].set_now(42)
+
+    a = arr[...].get_now()
+    assert a.shape == (10, 10)
+    assert np.all(a == 42)
+
+    c = arr.get_chunk_now((0, 0))
+    assert c.shape == (16, 16)
+    assert np.all(c[:10, :10] == 42)
+    assert np.all(c[10:, :] == 7)  # fill value
+    assert np.all(c[:, 10:] == 7)  # fill value
+
+
+def test_partial_chunk2():
+
+    # Same as test_partial_chunk1, but for an edge-chunk specifically
+
+    store = MemoryStore()
+
+    arr = ZarrArray.create(
+        store, "", (60, 60), "uint16", chunk_shape=(16, 16), fill_value=7
+    )
+    assert arr.chunk_grid_shape == (4, 4)
+
+    arr[...].set_now(42)
+
+    a = arr[...].get_now()
+    assert a.shape == (60, 60)
+    assert np.all(a == 42)
+
+    c = arr.get_chunk_now((3, 3))
+    assert c.shape == (16, 16)
+    assert np.all(c[:12, :12] == 42)
+    assert np.all(c[12:, :] == 7)  # fill value
+    assert np.all(c[:, 12:] == 7)  # fill value
+
+
 if __name__ == "__main__":
     for func in list(globals().values()):
         if callable(func) and func.__name__.startswith("test_"):
