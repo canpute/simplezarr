@@ -21,10 +21,16 @@ Examples:
     )
 """
 
+import itertools
+import math
+from collections import deque
+
 import numpy as np
 
 import simplezarr
 from simplezarr.utils.units import SPACE_UNITS, TIME_UNITS
+
+_DEFAULT_MAX_MEMORY = 1024**3  # == 2**30 == 1GiB
 
 
 def write_ome_zarr_pyramid(
@@ -44,7 +50,8 @@ def write_ome_zarr_pyramid(
     fill_value: object = None,
     chunk_path_separator: str | None = None,
     codecs: list[dict] | None = None,
-    _algorithm: str = "auto",
+    max_memory: int = _DEFAULT_MAX_MEMORY,
+    _steps: list | None = None,
 ):
     """
     Write an ome-zarr image pyramid to the given store.
@@ -78,6 +85,10 @@ def write_ome_zarr_pyramid(
             The path-separator to use for chunks. If not given, uses the src_array's chunk_path_separator.
         codecs : list[dict] | None
             Same as ``ZarrArray.create()``. If not given, uses the src_array's codecs.
+        max_memory : int
+            The approximate maximum amount of memory (in bytes) to use for intermediate
+            data in the "depthfirst" algorithm. The default is 1GiB.
+            Set to 0 to force using the simple algorithm.
     """
 
     # Allow numpy array input -> convert to an in-memory ZarrArray
@@ -280,15 +291,13 @@ def write_ome_zarr_pyramid(
     # Write toplevel ZarrGroup for this pyramid
     zarr_group = simplezarr.ZarrGroup.create(store, path, attributes=attributes)
 
-    if _algorithm == "auto":
-        # Could do more sophisticated selection :)
-        _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape)
-    elif _algorithm == "simple":
+    max_memory = int(max_memory)
+    if max_memory <= 0:
         _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method)
-    elif _algorithm == "depthfirst":
-        _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape)
     else:
-        raise RuntimeError(f"Invalid algorithm {_algorithm}")
+        _write_large_pyramid(
+            src_array, new_arrays, zyx_ndim, method, chunk_shape, max_memory, _steps
+        )
 
     return zarr_group
 
@@ -299,127 +308,222 @@ def _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method):
     tc_shape = src_array.shape[:-zyx_ndim]
     inner_indices = _get_inner_indices(tc_shape)
 
-    # src_zyx_shape = src_array.shape[-zyx_ndim:]
-    # src_slices = tuple(slice(0, s, 1) for s in src_zyx_shape)
-    src_data = data = src_array[...].get_now()
+    src_data = src_array[...].get_now()
+    data = src_data
 
     futures = []
     for level, new_array in enumerate(new_arrays):
-        if level == 0:
-            new_data = src_data
-        else:
-            new_data = np.zeros(new_array.shape, new_array.dtype)
-            new_zyx_shape = new_data.shape[-zyx_ndim:]
-            subslices2 = tuple(slice(0, s, 1) for s in new_zyx_shape)
-            subslices1 = tuple(slice(0, s.stop * 2, 1) for s in subslices2)
-            for index in inner_indices:  # for each time/channel combi
-                new_data[*index, *subslices2] = _downsample(
-                    data[*index, *subslices1], method
-                )
+        if level > 0:
+            data = _downsample_to_shape(
+                data, new_array.shape, zyx_ndim, method, inner_indices
+            )
 
         # Write
-        fut = new_array[...].set_soon(new_data)
+        fut = new_array[...].set_soon(data)
         futures.append(fut)
-
-        # Next
-        data = new_data
 
     # Wait for all writing to finish
     for fut in futures:
         fut.result()
 
 
-def _write_large_pyramid(src_array, new_arrays, zyx_ndim, method, chunk_shape):
-    """Depth-first algorithm to create a pyramid, so it can handle data of any size without running out of memory."""
+def _write_large_pyramid(
+    src_array, new_arrays, zyx_ndim, method, chunk_shape, max_memory, steps=None
+):
+    """Depth-first algorithm to create a pyramid, so it can handle data of any size without running out of memory.
 
+    The pyramid is built bottom-up in steps. Each step selects a set of chunks
+    at the current bottom level, and downsamples it, level by level, until the
+    selection is exactly a single chunk: the intermediate top of that step.
+    The number of selected chunks is a power of 2 in each spatial dimension,
+    and is calculated from the memory constraint. Because the selection is
+    chunk-aligned at every level, all writes are whole-chunk writes, which can
+    be issued asynchronously.
+
+    At the intermediate top of a step there are two options:
+    * If the full intermediate level fits in memory, it is kept in memory
+      while the bottom level is processed, and the remaining levels are
+      written using the same approach as _write_simple_pyramid.
+    * Otherwise the intermediate level is only written to disk, and the next
+      step loads those chunks from disk again. This is slower, but uses less
+      memory.
+
+    If the given `steps` list is not None, a dict is appended to it for each
+    step, specifying the bottom level, the number of levels created, and
+    whether the intermediate top was kept in memory. This is for diagnostics/testing.
+    """
+
+    nlevels = len(new_arrays)
     tc_shape = src_array.shape[:-zyx_ndim]
+    tc_slices = tuple(slice(None) for _ in tc_shape)
     inner_indices = _get_inner_indices(tc_shape)
-    tc_slices = [slice(None) for _ in tc_shape]
-
-    src_zyx_shape = src_array.shape[-zyx_ndim:]
-    src_slices = tuple(slice(0, s, 1) for s in src_zyx_shape)
-
+    tc_size = math.prod(tc_shape)
+    itemsize = np.dtype(new_arrays[0].dtype).itemsize
     zyx_chunk_shape = chunk_shape[-zyx_ndim:]
 
-    # Determine pyramid-building steps
-    # The more levels per step, the more efficient this becomes, but also the more memory this takes
-    levels_per_step = 3
-    chunk_multiply_factor = 2**levels_per_step
+    # Calculate how many chunks we can select at the bottom, given the memory
+    # constraint. The selection is a power of 2 chunks in each spatial
+    # dimension, so that the intermediate top is exactly a single chunk.
+    levels_per_step = _get_levels_per_step(
+        max_memory, tc_size, zyx_chunk_shape, itemsize, nlevels - 1
+    )
 
-    pyramid_base_size = tuple(chunk_multiply_factor * i for i in zyx_chunk_shape)
+    # Writes are issued asynchronously, but pending data counts toward the
+    # memory usage, so we flush the oldest pending write when over budget.
+    pending = deque()  # (future, nbytes)
+    pending_nbytes = 0
+    write_budget = 0
 
-    zyx_slices_list = []
-    if zyx_ndim == 2:
-        for dy in range(0, src_zyx_shape[-2], pyramid_base_size[-2]):
-            for dx in range(0, src_zyx_shape[-1], pyramid_base_size[-1]):
-                slices = (
-                    slice(dy, dy + pyramid_base_size[-2], 1),
-                    slice(dx, dx + pyramid_base_size[-1], 1),
+    def submit_write(zarr_array, index, data):
+        nonlocal pending_nbytes
+        fut = zarr_array[index].set_soon(data)
+        nbytes = data.nbytes
+        pending.append((fut, nbytes))
+        pending_nbytes += nbytes
+        while pending and pending_nbytes > write_budget:
+            fut2, nbytes2 = pending.popleft()
+            pending_nbytes -= nbytes2
+            fut2.result()
+
+    level = 0
+    while True:
+        # The number of levels that this step creates
+        k = min(levels_per_step, nlevels - 1 - level)
+
+        # Decide whether we can keep the intermediate top of this step in
+        # memory, so that we can do the remaining levels with the simple
+        # approach. If not, the next step loads the chunks from disk again.
+        step_nbytes = _step_nbytes(k, tc_size, zyx_chunk_shape, itemsize)
+        keep_in_memory = False
+        intermediate = None
+        if level + k < nlevels - 1:
+            inter_nbytes = _array_nbytes(new_arrays[level + k])
+            tail_nbytes = sum(
+                _array_nbytes(new_arrays[j]) for j in range(level + k, nlevels)
+            )
+            keep_in_memory = max(step_nbytes + inter_nbytes, tail_nbytes) <= max_memory
+            if keep_in_memory:
+                intermediate = np.zeros(
+                    new_arrays[level + k].shape,
+                    np.dtype(new_arrays[level + k].dtype),
                 )
-                zyx_slices_list.append(slices)
-    else:
-        assert zyx_ndim == 3
-        for dz in range(0, src_zyx_shape[-3], pyramid_base_size[-3]):
-            for dy in range(0, src_zyx_shape[-2], pyramid_base_size[-2]):
-                for dx in range(0, src_zyx_shape[-1], pyramid_base_size[-1]):
-                    slices = (
-                        slice(dz, dz + pyramid_base_size[-3], 1),
-                        slice(dy, dy + pyramid_base_size[-2], 1),
-                        slice(dx, dx + pyramid_base_size[-1], 1),
-                    )
-                    zyx_slices_list.append(slices)
+                write_budget = max_memory - step_nbytes - inter_nbytes
+            else:
+                write_budget = max_memory - step_nbytes
+        else:
+            write_budget = max_memory - step_nbytes
 
-    # print(f"Source array's shape is {src_array.shape}, spatially {src_zyx_shape}")
-    # print(f"Identified {len(zyx_slices_list)} initial pyramid building steps")
+        if steps is not None:
+            steps.append(
+                {"level": level, "nlevels": k, "kept_in_memory": keep_in_memory}
+            )
 
-    futures = []
-
-    for _step_index, zyx_slices in enumerate(zyx_slices_list):
-        # print(f"Step {step_index}/{len(zyx_slices_list)}")
-
-        # The zyx_slices are the slice in the full array, we reduce it in the loop below
-        src_data = data = src_array[*tc_slices, *zyx_slices].get_now()
-        src_slices = tuple(
-            slice(zyx_slices[i].start, min(zyx_slices[i].stop, src_zyx_shape[i]), 1)
-            for i in range(zyx_ndim)
-        )
-
-        for level, new_array in enumerate(new_arrays):
-            # Downscale
-
+        # Select chunks at the current bottom level, and process each selection
+        phase_src = src_array if level == 0 else new_arrays[level]
+        zyx_shape = phase_src.shape[-zyx_ndim:]
+        sel_steps = tuple((2**k) * c for c in zyx_chunk_shape)
+        starts_per_dim = [range(0, zyx_shape[i], sel_steps[i]) for i in range(zyx_ndim)]
+        for starts in itertools.product(*starts_per_dim):
+            sel_slices = tuple(
+                slice(starts[i], min(starts[i] + sel_steps[i], zyx_shape[i]), 1)
+                for i in range(zyx_ndim)
+            )
+            data = phase_src[*tc_slices, *sel_slices].get_now()
             if level == 0:
-                new_data = src_data
-                new_slices = src_slices
-            else:
+                submit_write(new_arrays[0], (*tc_slices, *sel_slices), data)
+            slices = sel_slices
+            for j in range(1, k + 1):
                 new_slices = tuple(slice(s.start // 2, s.stop // 2, 1) for s in slices)
-                xyz_shape = data.shape[-zyx_ndim:]
-                new_zyx_shape = tuple(xyz_shape[i] // 2 for i in range(zyx_ndim))
-                new_shape = (*tc_shape, *new_zyx_shape)
-                new_data = np.zeros(new_shape, data.dtype)
-                subslices2 = tuple(slice(0, s, 1) for s in new_zyx_shape)
-                subslices1 = tuple(slice(0, s.stop * 2, 1) for s in subslices2)
-                for index in inner_indices:  # for each time/channel combi
-                    new_data[*index, *subslices2] = _downsample(
-                        data[*index, *subslices1], method
-                    )
+                new_zyx_shape = tuple(s // 2 for s in data.shape[-zyx_ndim:])
+                new_data = _downsample_to_shape(
+                    data,
+                    (*tc_shape, *new_zyx_shape),
+                    zyx_ndim,
+                    method,
+                    inner_indices,
+                )
+                submit_write(new_arrays[level + j], (*tc_slices, *new_slices), new_data)
+                if j == k and intermediate is not None:
+                    intermediate[*tc_slices, *new_slices] = new_data
+                data = new_data
+                slices = new_slices
 
-            # Write
-            fut = new_array[*tc_slices, *new_slices].set_soon(new_data)
+        # Wait for this step's writes to finish
+        while pending:
+            fut, nbytes = pending.popleft()
+            pending_nbytes -= nbytes
+            fut.result()
 
-            # Until we process whole chunks, we can wait for the write to finish later.
-            # When our writes are mid-chunk, we cannot.
-            if level < levels_per_step:
-                futures.append(fut)
-            else:
+        level += k
+
+        if intermediate is not None:
+            # Do the remaining levels from the in-memory intermediate level,
+            # using the same approach as _write_simple_pyramid
+            if steps is not None:
+                steps.append(
+                    {
+                        "level": level,
+                        "nlevels": nlevels - 1 - level,
+                        "kept_in_memory": True,
+                    }
+                )
+            data = intermediate
+            futures = []
+            for j in range(level + 1, nlevels):
+                data = _downsample_to_shape(
+                    data, new_arrays[j].shape, zyx_ndim, method, inner_indices
+                )
+                futures.append(new_arrays[j][...].set_soon(data))
+            for fut in futures:
                 fut.result()
+            level = nlevels - 1
 
-            # Next
-            data = new_data
-            slices = new_slices
+        if level >= nlevels - 1:
+            break
 
-    # Wait for this step to finish writing
-    for fut in futures:
-        fut.result()
+
+def _get_levels_per_step(max_memory, tc_size, zyx_chunk_shape, itemsize, max_levels):
+    """Calculate the number of chunks to select at the bottom, given the memory constraint.
+
+    The selection is a power of 2 chunks in each spatial dimension, so that
+    the intermediate top is exactly a single chunk. At least one level is
+    selected per step, so that we always make progress.
+    """
+    levels_per_step = 1
+    while (
+        levels_per_step < max_levels
+        and _step_nbytes(levels_per_step + 1, tc_size, zyx_chunk_shape, itemsize)
+        <= max_memory
+    ):
+        levels_per_step += 1
+    return levels_per_step
+
+
+def _step_nbytes(levels_per_step, tc_size, zyx_chunk_shape, itemsize):
+    """The approximate amount of memory needed to process one selection of 2**levels_per_step chunks
+    (per spatial dimension), including the intermediate downsampled selections.
+    """
+    zyx_ndim = len(zyx_chunk_shape)
+    chunk_pixels = math.prod(zyx_chunk_shape)
+    total_pixels = sum(
+        chunk_pixels * 2 ** (i * zyx_ndim) for i in range(levels_per_step + 1)
+    )
+    return itemsize * tc_size * total_pixels
+
+
+def _array_nbytes(zarr_array):
+    return math.prod(zarr_array.shape) * np.dtype(zarr_array.dtype).itemsize
+
+
+def _downsample_to_shape(data, new_shape, zyx_ndim, method, inner_indices):
+    """Downsample (local mean) the last zyx_ndim dimensions of the given array to the given shape."""
+    new_data = np.zeros(new_shape, data.dtype)
+    new_zyx_shape = new_data.shape[-zyx_ndim:]
+    subslices2 = tuple(slice(0, s, 1) for s in new_zyx_shape)
+    subslices1 = tuple(slice(0, s.stop * 2, 1) for s in subslices2)
+    for index in inner_indices:  # for each time/channel combi
+        new_data[*index, *subslices2] = _downsample(data[*index, *subslices1], method)
+    return new_data
 
 
 def _get_inner_indices(tc_shape):
