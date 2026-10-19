@@ -60,7 +60,7 @@ def write_ome_zarr_pyramid(
         store : simplezarr.BaseStore
             The simplezarr store object to store the Zarr pyramid in.
         path : str
-            The path in the store for the group that represents the pyramid.
+            The path in the store to write the group that represents the pyramid.
         src_array : ZarrArray or np.ndarray
             The source array. An array of 2, 3, 4 or 5 dimensions (t, c, z, y, x).
         axes : str

@@ -402,9 +402,7 @@ def test_write_multiscale_zarr_source():
     src = np.random.default_rng(42).random(zyx_shape).astype(np.float32)
 
     s1 = MemoryStore()
-    src_array = ZarrArray.create(
-        s1, "source", zyx_shape, "float32", chunk_shape=(8, 8)
-    )
+    src_array = ZarrArray.create(s1, "source", zyx_shape, "float32", chunk_shape=(8, 8))
     src_array[...].set_now(src)
 
     nlevels = _expected_auto_nlevels(zyx_shape, (8, 8))
@@ -414,9 +412,7 @@ def test_write_multiscale_zarr_source():
 
     for max_memory in [0, 1]:
         s = MemoryStore()
-        write_ome_zarr_pyramid(
-            s, "my/pyramid", src_array, "yx", max_memory=max_memory
-        )
+        write_ome_zarr_pyramid(s, "my/pyramid", src_array, "yx", max_memory=max_memory)
         for i in range(nlevels):
             arr = open_zarr(s, f"my/pyramid/level{i}")
             assert arr.chunk_shape == (8, 8), (max_memory, i)
