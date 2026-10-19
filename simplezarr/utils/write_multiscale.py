@@ -51,7 +51,7 @@ def write_ome_zarr_pyramid(
     chunk_path_separator: str | None = None,
     codecs: list[dict] | None = None,
     max_memory: int = _DEFAULT_MAX_MEMORY,
-    _steps: list | None = None,
+    steps: list | None = None,
 ):
     """
     Write an ome-zarr image pyramid to the given store.
@@ -89,6 +89,11 @@ def write_ome_zarr_pyramid(
             The approximate maximum amount of memory (in bytes) to use for intermediate
             data in the "depthfirst" algorithm. The default is 1GiB.
             Set to 0 to force using the simple algorithm.
+        steps : list | None
+            For diagnosis: if a list is given, a dict is appended to it (in-place)
+            for each step that the algorithm takes, specifying the bottom level,
+            the number of levels created in that step, and whether the intermediate
+            top level was kept in memory.
     """
 
     # Allow numpy array input -> convert to an in-memory ZarrArray
@@ -293,10 +298,14 @@ def write_ome_zarr_pyramid(
 
     max_memory = int(max_memory)
     if max_memory <= 0:
+        if steps is not None:
+            steps.append(
+                {"level": 0, "nlevels": len(new_arrays) - 1, "kept_in_memory": True}
+            )
         _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method)
     else:
         _write_large_pyramid(
-            src_array, new_arrays, zyx_ndim, method, chunk_shape, max_memory, _steps
+            src_array, new_arrays, zyx_ndim, method, chunk_shape, max_memory, steps
         )
 
     return zarr_group
