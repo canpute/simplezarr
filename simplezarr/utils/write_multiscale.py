@@ -79,6 +79,8 @@ def write_ome_zarr_pyramid(
             The chunk_shape for all levels in the new array. If not given, use the src_array's chunk_shape.
         dtype : str
             The data type of the new array. If not given, uses the src_array's dtype.
+            When casting to an integer dtype, values are rounded and clipped to
+            the dtype's range.
         fill_value
             The value to fill in when no chunk is present. If not given, uses the src_array's fill_value.
         chunk_path_separator : str
@@ -145,10 +147,10 @@ def write_ome_zarr_pyramid(
 
     # Build axes list
     axes_list = []
-    for name in axes:
-        typ = {"t": "time", "c": "channel"}.get(name, "space")
-        unit = {"t": "", "c": ""}.get(name, space_unit)
-        d = {"name": name, "type": typ}
+    for a in axes:
+        typ = {"t": "time", "c": "channel"}.get(a, "space")
+        unit = {"t": "", "c": ""}.get(a, space_unit)
+        d = {"name": a, "type": typ}
         if unit:
             d["unit"] = unit
             if typ == "space" and unit not in SPACE_UNITS:
@@ -175,7 +177,7 @@ def write_ome_zarr_pyramid(
         chunk_shape = src_array.chunk_shape
         zyx_chunk_shape = chunk_shape[-zyx_ndim:]
     elif isinstance(chunk_shape, int):
-        zyx_chunk_shape = (chunk_shape,) * chunk_shape
+        zyx_chunk_shape = (chunk_shape,) * zyx_ndim
         chunk_shape = (*src_array.shape[:-zyx_ndim], *zyx_chunk_shape)
     else:
         if len(chunk_shape) != ndim:
@@ -317,7 +319,8 @@ def _write_simple_pyramid(src_array, new_arrays, zyx_ndim, method):
     tc_shape = src_array.shape[:-zyx_ndim]
     inner_indices = _get_inner_indices(tc_shape)
 
-    src_data = src_array[...].get_now()
+    # The pyramid arrays may have a different dtype than the source array
+    src_data = _cast_to_dtype(src_array[...].get_now(), new_arrays[0].dtype)
     data = src_data
 
     futures = []
@@ -439,6 +442,8 @@ def _write_large_pyramid(
             )
             data = phase_src[*tc_slices, *sel_slices].get_now()
             if level == 0:
+                # The source data may have a different dtype than the pyramid
+                data = _cast_to_dtype(data, new_arrays[0].dtype)
                 submit_write(new_arrays[0], (*tc_slices, *sel_slices), data)
             slices = sel_slices
             for j in range(1, k + 1):
@@ -533,6 +538,22 @@ def _downsample_to_shape(data, new_shape, zyx_ndim, method, inner_indices):
     for index in inner_indices:  # for each time/channel combi
         new_data[*index, *subslices2] = _downsample(data[*index, *subslices1], method)
     return new_data
+
+
+def _cast_to_dtype(data, dtype):
+    """Cast the given data to the given dtype.
+
+    When casting to an integer dtype, values are rounded (instead of
+    truncated) and clipped to the dtype's range (instead of wrapping around).
+    """
+    dtype = np.dtype(dtype)
+    if data.dtype == dtype:
+        return data
+    if np.issubdtype(dtype, np.integer):
+        b = np.rint(data) if np.issubdtype(data.dtype, np.floating) else data
+        info = np.iinfo(dtype)
+        return np.clip(b, info.min, info.max).astype(dtype)
+    return data.astype(dtype)
 
 
 def _get_inner_indices(tc_shape):

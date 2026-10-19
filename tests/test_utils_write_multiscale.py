@@ -5,7 +5,6 @@ from simplezarr import MemoryStore, ZarrArray, open_zarr
 from simplezarr.utils.write_multiscale import (
     _get_levels_per_step,
     _step_nbytes,
-    _write_large_pyramid,
     write_ome_zarr_pyramid,
 )
 
@@ -231,31 +230,12 @@ def test_get_levels_per_step():
     assert _get_levels_per_step(18688, 1, (4, 4, 4), 4, 100) == 2
 
 
-def _create_depthfirst_pyramid(src, chunk, nlevels, zyx_ndim):
-    """Create a source ZarrArray and the (empty) level arrays, like write_ome_zarr_pyramid does."""
-    s = MemoryStore()
-    src_array = ZarrArray.create(s, "", src.shape, src.dtype, chunk_shape=chunk)
-    src_array[...].set_now(src)
-
-    store = MemoryStore()
-    new_arrays = []
-    shape = src.shape
-    for level in range(nlevels):
-        if level > 0:
-            shape = (*shape[:-zyx_ndim], *(s // 2 for s in shape[-zyx_ndim:]))
-        new_arrays.append(
-            ZarrArray.create(
-                store, f"level{level}", shape, src.dtype, chunk_shape=chunk
-            )
-        )
-    return src_array, new_arrays, store
-
-
 def test_write_multiscale_depthfirst_max_memory():
     # Different memory constraints lead to different bottom-up strategies:
     # fewer or more levels per step, and either keeping the intermediate top
     # in memory (finishing with the simple approach), or loading the chunks
-    # from disk again in the next step.
+    # from disk again in the next step. The `steps` argument reports
+    # the strategy that was taken.
     #
     # For a (64, 96) float32 array with (4, 4) chunks: a chunk is 64 bytes,
     # the level sizes are [24576, 6144, 1536, 384, 96, 24] bytes, and a step
@@ -274,6 +254,7 @@ def test_write_multiscale_depthfirst_max_memory():
 
     configs = [
         # (max_memory, expected steps as (bottom level, levels created, kept in memory))
+        (0, [(0, 5, True)]),  # the simple algorithm does everything in one step
         (
             1,
             [(0, 1, False), (1, 1, False), (2, 1, False), (3, 1, False), (4, 1, False)],
@@ -291,30 +272,15 @@ def test_write_multiscale_depthfirst_max_memory():
     ]
 
     for max_memory, expected_steps in configs:
-        # Via the public API
         s = MemoryStore()
-        write_ome_zarr_pyramid(
-            s,
-            "",
-            src,
-            "yx",
-            chunk_shape=chunk,
-            max_memory=max_memory,
-        )
-        for i in range(nlevels):
-            got = open_zarr(s, f"level{i}")[...].get_now()
-            assert np.allclose(got, ref[i]), (max_memory, i)
-
-        # Directly, so that we can also check the steps that were taken
-        src_array, new_arrays, _ = _create_depthfirst_pyramid(src, chunk, nlevels, 2)
         steps = []
-        _write_large_pyramid(
-            src_array, new_arrays, 2, "local_mean", chunk, max_memory, steps
+        write_ome_zarr_pyramid(
+            s, "", src, "yx", chunk_shape=chunk, max_memory=max_memory, steps=steps
         )
         got_steps = [(d["level"], d["nlevels"], d["kept_in_memory"]) for d in steps]
         assert got_steps == expected_steps, (max_memory, got_steps)
         for i in range(nlevels):
-            got = new_arrays[i][...].get_now()
+            got = open_zarr(s, f"level{i}")[...].get_now()
             assert np.allclose(got, ref[i]), (max_memory, i)
 
     # Also a 3D case: a (32, 40, 24) float32 array with (4, 4, 4) chunks.
@@ -337,16 +303,229 @@ def test_write_multiscale_depthfirst_max_memory():
     ]
 
     for max_memory, expected_steps in configs:
-        src_array, new_arrays, _ = _create_depthfirst_pyramid(src, chunk, nlevels, 3)
+        s = MemoryStore()
         steps = []
-        _write_large_pyramid(
-            src_array, new_arrays, 3, "local_mean", chunk, max_memory, steps
+        write_ome_zarr_pyramid(
+            s, "", src, "zyx", chunk_shape=chunk, max_memory=max_memory, steps=steps
         )
         got_steps = [(d["level"], d["nlevels"], d["kept_in_memory"]) for d in steps]
         assert got_steps == expected_steps, (max_memory, got_steps)
         for i in range(nlevels):
-            got = new_arrays[i][...].get_now()
+            got = open_zarr(s, f"level{i}")[...].get_now()
             assert np.allclose(got, ref[i]), (max_memory, i)
+
+
+def _cast_reference(data, dtype):
+    """Reference for how write_ome_zarr_pyramid casts to another dtype."""
+    dtype = np.dtype(dtype)
+    if np.issubdtype(dtype, np.integer):
+        info = np.iinfo(dtype)
+        return np.clip(np.rint(data), info.min, info.max).astype(dtype)
+    return data.astype(dtype)
+
+
+def test_write_multiscale_dtype():
+    # Writing a pyramid with a different dtype than the source. Casting to an
+    # integer dtype must round (instead of truncate) and clip to the dtype's
+    # range (instead of wrapping around). Each level is the downsample of the
+    # previous (stored) level.
+
+    # A float32 source with values that need rounding and clipping
+    rng = np.random.default_rng(42)
+    src = (rng.random((16, 24)) * 300).astype(np.float32)
+    src[0, 0] = 1000.0  # out of range for uint8
+
+    chunk = (4, 4)
+    nlevels = _expected_auto_nlevels((16, 24), chunk)
+
+    ref = [_cast_reference(src, "uint8")]
+    for _ in range(nlevels - 1):
+        ref.append(_cast_reference(_downsample_reference(ref[-1], 2), "uint8"))
+
+    for max_memory in [0, 1]:
+        s = MemoryStore()
+        write_ome_zarr_pyramid(
+            s, "", src, "yx", chunk_shape=chunk, dtype="uint8", max_memory=max_memory
+        )
+        for i in range(nlevels):
+            arr = open_zarr(s, f"level{i}")
+            assert arr.dtype == "uint8", (max_memory, i)
+            got = arr[...].get_now()
+            assert got.dtype == np.uint8, (max_memory, i)
+            assert np.array_equal(got, ref[i]), (max_memory, i)
+
+    # An integer source with a float pyramid: means are exact, no rounding
+    src = rng.integers(0, 200, (16, 24), dtype=np.uint8)
+    ref = [src.astype(np.float32)]
+    for _ in range(nlevels - 1):
+        ref.append(_downsample_reference(ref[-1], 2).astype(np.float32))
+
+    for max_memory in [0, 1]:
+        s = MemoryStore()
+        write_ome_zarr_pyramid(
+            s, "", src, "yx", chunk_shape=chunk, dtype="float32", max_memory=max_memory
+        )
+        for i in range(nlevels):
+            got = open_zarr(s, f"level{i}")[...].get_now()
+            assert np.allclose(got, ref[i]), (max_memory, i)
+
+
+def test_write_multiscale_int_chunk_shape():
+    # An int chunk_shape means that chunk size for all spatial dimensions,
+    # with the t/c dimensions covered by a single chunk
+    for shape, axes in [((16, 16), "yx"), ((16, 16, 16), "zyx"), ((2, 16, 16), "cyx")]:
+        zyx_ndim = sum(1 for a in axes if a in "xyz")
+        expected_chunk = (*shape[:-zyx_ndim], *((4,) * zyx_ndim))
+        zyx_shape = tuple(s for s, ax in zip(shape, axes, strict=True) if ax in "xyz")
+
+        src = np.random.default_rng(42).random(shape).astype(np.float32)
+        nlevels = _expected_auto_nlevels(zyx_shape, (4,) * zyx_ndim)
+        ref = [src]
+        for _ in range(nlevels - 1):
+            ref.append(_downsample_reference(ref[-1], zyx_ndim))
+
+        for max_memory in [0, 1]:
+            s = MemoryStore()
+            write_ome_zarr_pyramid(
+                s, "", src, axes, chunk_shape=4, max_memory=max_memory
+            )
+            for i in range(nlevels):
+                arr = open_zarr(s, f"level{i}")
+                assert arr.chunk_shape == expected_chunk, (axes, i)
+                assert np.allclose(arr[...].get_now(), ref[i]), (axes, i)
+
+
+def test_write_multiscale_zarr_source():
+    # A ZarrArray in its own store as the source: the chunk_shape is inherited,
+    # and the pyramid can be written to a nested path in the target store.
+    zyx_shape = (40, 56)
+    src = np.random.default_rng(42).random(zyx_shape).astype(np.float32)
+
+    s1 = MemoryStore()
+    src_array = ZarrArray.create(
+        s1, "source", zyx_shape, "float32", chunk_shape=(8, 8)
+    )
+    src_array[...].set_now(src)
+
+    nlevels = _expected_auto_nlevels(zyx_shape, (8, 8))
+    ref = [src]
+    for _ in range(nlevels - 1):
+        ref.append(_downsample_reference(ref[-1], 2))
+
+    for max_memory in [0, 1]:
+        s = MemoryStore()
+        write_ome_zarr_pyramid(
+            s, "my/pyramid", src_array, "yx", max_memory=max_memory
+        )
+        for i in range(nlevels):
+            arr = open_zarr(s, f"my/pyramid/level{i}")
+            assert arr.chunk_shape == (8, 8), (max_memory, i)
+            assert np.allclose(arr[...].get_now(), ref[i]), (max_memory, i)
+
+
+def test_write_multiscale_metadata():
+    # The ome metadata of the pyramid: name, axes, and per-level
+    # scale and translation coordinate transformations
+    shape = (2, 3, 16, 32)
+    src = np.random.default_rng(42).random(shape).astype(np.float32)
+
+    s = MemoryStore()
+    g = write_ome_zarr_pyramid(
+        s,
+        "pyr",
+        src,
+        "tcyx",
+        name="myname",
+        space_unit="micrometer",
+        base_scale=2.0,
+        chunk_shape=(1, 1, 4, 4),
+        nlevels=3,
+        max_memory=0,
+    )
+
+    ms = g.attributes["ome"]["multiscales"][0]
+    assert ms["name"] == "myname"
+    assert [d["name"] for d in ms["axes"]] == ["t", "c", "y", "x"]
+    assert [d["type"] for d in ms["axes"]] == ["time", "channel", "space", "space"]
+    assert [d.get("unit", "") for d in ms["axes"]] == [
+        "",
+        "",
+        "micrometer",
+        "micrometer",
+    ]
+
+    datasets = ms["datasets"]
+    assert [d["path"] for d in datasets] == ["level0", "level1", "level2"]
+    for i, d in enumerate(datasets):
+        scale, translation = d["coordinateTransformations"]
+        assert scale["type"] == "scale"
+        assert scale["scale"] == (1.0, 1.0, 2.0 * 2**i, 2.0 * 2**i), i
+        assert translation["type"] == "translation"
+        assert translation["translation"] == (
+            0,
+            0,
+            2.0 * 2**i / 2 - 1.0,
+            2.0 * 2**i / 2 - 1.0,
+        ), i
+
+    # The metadata is also there when the group is opened again
+    assert open_zarr(s, "pyr").attributes["ome"]["multiscales"][0]["name"] == "myname"
+
+    # base_scale can also be given per dimension
+    s = MemoryStore()
+    g = write_ome_zarr_pyramid(
+        s,
+        "",
+        src,
+        "tcyx",
+        base_scale=(1.0, 0.5, 2.0, 4.0),
+        chunk_shape=(1, 1, 4, 4),
+        nlevels=2,
+    )
+    ms = g.attributes["ome"]["multiscales"][0]
+    d0, d1 = ms["datasets"]
+    assert d0["coordinateTransformations"][0]["scale"] == (1.0, 0.5, 2.0, 4.0)
+    assert d1["coordinateTransformations"][0]["scale"] == (1.0, 0.5, 4.0, 8.0)
+
+
+def test_write_multiscale_steps():
+    # The steps taken by the algorithm can be obtained via the public API
+    src = np.zeros((16, 16), np.float32)
+
+    # A single level: one trivial step that creates no levels
+    for max_memory, kept in [(0, True), (1, False)]:
+        s = MemoryStore()
+        steps = []
+        write_ome_zarr_pyramid(
+            s,
+            "",
+            src,
+            "yx",
+            chunk_shape=(4, 4),
+            nlevels=1,
+            max_memory=max_memory,
+            steps=steps,
+        )
+        assert steps == [{"level": 0, "nlevels": 0, "kept_in_memory": kept}]
+
+
+def test_write_multiscale_input_validation():
+    src = np.zeros((8, 8), np.float32)
+
+    with pytest.raises(TypeError):
+        write_ome_zarr_pyramid(MemoryStore(), "", "not an array", "yx")
+    with pytest.raises(ValueError):
+        # 1D is not enough
+        write_ome_zarr_pyramid(MemoryStore(), "", np.zeros(8, np.float32), "yx")
+    with pytest.raises(ValueError):
+        # axes length does not match the array
+        write_ome_zarr_pyramid(MemoryStore(), "", src, "zyx")
+    with pytest.raises(ValueError):
+        # not a valid combination of axes
+        write_ome_zarr_pyramid(MemoryStore(), "", src, "xyz")
+    with pytest.raises(TypeError):
+        # base_scale must be a float or a tuple of floats
+        write_ome_zarr_pyramid(MemoryStore(), "", src, "yx", base_scale=2)
 
 
 if __name__ == "__main__":
