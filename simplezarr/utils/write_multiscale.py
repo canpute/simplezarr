@@ -3,7 +3,7 @@ Support for writing multiscale images, a.k.a. ome-zarr pyramids.
 
 Supports huge datasets by building the pyramid up in pieces. Has fast throughput by adopting a depth-first approach and makes use of parallel writes.
 
-Currently it seems to be about 4 times faster than ome-zarr, but we have not applied all tricks yet.
+Currently it seems to be about 4-10 times faster than the ome-zarr Python library, depending on various factors like chunk size.
 
 Examples:
 

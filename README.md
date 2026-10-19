@@ -1,5 +1,5 @@
 # simplezarr
-A simple, elegant, and efficient Zarr implementation
+A simple, elegant, and fast Zarr implementation
 
 
 ## Intro
@@ -20,6 +20,8 @@ Extra functionality is provided as functions and classes that are provided in `s
 This keeps the lib light, and easy to adopt in a wide variety of use cases.
 
 The Zarr 3.1 spec is fully implemented, except for sharding. The core has 100% test coverage.
+
+Also supports reading and writing multiscale OME-Zarr pyramids - and it's fast!
 
 
 ## Installation
