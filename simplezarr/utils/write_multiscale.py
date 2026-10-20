@@ -108,6 +108,7 @@ def write_ome_zarr_pyramid(
     base_scale: float | tuple[float, ...] = 1.0,
     chunk_shape: int | tuple[int] = 64,
     chunk_path_separator: str = ".",
+    pyramid_path_prefix: str = "pyramid",
     max_memory: int = _DEFAULT_MAX_MEMORY,
     steps: list | None = None,
 ):
@@ -125,7 +126,8 @@ def write_ome_zarr_pyramid(
         pyramids : PyramidData or list[PyramidData]
             The definition for each multiscale pyramid in the Zarr files. Historically it's common for OME-Zarr files
             to have a single pyramid, but the spec allows multiple pyramids, which can be convenient for better
-            separation of e.g. codecs. In this implementation, the scaling and chunk size are forced to be the same
+            separation of e.g. codecs. If multiple pyramds are written, it's up to the reader to interpret
+            what the different pyramids mean. In this implementation, the shape, scaling and chunk size are forced to be the same
             across multiple pyramids.
         nlevels : int
             The number of scale levels to create. If zero, determine automatically
@@ -138,6 +140,8 @@ def write_ome_zarr_pyramid(
             The chunk_shape for all levels in the new array. Default 64.
         chunk_path_separator : str
             The path-separator to use for chunks. Default '.'.
+        pyramid_path_prefix : str
+            The path prefix that is used when multiple pyramids are written. Default 'pyramid'.
         max_memory : int
             The approximate maximum amount of memory (in bytes) to use for intermediate
             data in the "depthfirst" algorithm. The default is 1GiB.
@@ -302,7 +306,7 @@ def write_ome_zarr_pyramid(
                 break
             array_path = f"{path_prefix}{level}"
             if len(pyramids) > 1:
-                array_path = f"pyramid{pyramid_index}/" + array_path
+                array_path = f"{pyramid_path_prefix}{pyramid_index}/" + array_path
             new_array = simplezarr.ZarrArray.create(
                 store,
                 f"{path}/{array_path}",
