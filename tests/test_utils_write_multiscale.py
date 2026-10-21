@@ -1,11 +1,12 @@
 import numpy as np
 import pytest
 
-from simplezarr import MemoryStore, ZarrArray, open_zarr
+from simplezarr import MemoryStore, ZarrArray, ZarrGroup, open_zarr
 from simplezarr.utils.write_multiscale import (
     _get_levels_per_step,
     _step_nbytes,
     write_ome_zarr_pyramid,
+    PyramidData,
 )
 
 
@@ -14,7 +15,9 @@ def test_write_multiscale_even():
         s = MemoryStore()
 
         a = np.array([[1, 2, 3, 4, 5, 6, 7, 8]] * 8, np.float32)
-        write_ome_zarr_pyramid(s, "", a, "yx", nlevels=3, max_memory=max_memory)
+        write_ome_zarr_pyramid(
+            s, "", "yx", PyramidData(a), nlevels=3, max_memory=max_memory
+        )
 
         a0 = open_zarr(s, "level0")[...].get_now()
         a1 = open_zarr(s, "level1")[...].get_now()
@@ -37,7 +40,9 @@ def test_write_multiscale_uneven():
         s = MemoryStore()
 
         a = np.array([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]] * 11, np.float32)
-        write_ome_zarr_pyramid(s, "", a, "yx", nlevels=3, max_memory=max_memory)
+        write_ome_zarr_pyramid(
+            s, "", "yx", PyramidData(a), nlevels=3, max_memory=max_memory
+        )
 
         a0 = open_zarr(s, "level0")[...].get_now()
         a1 = open_zarr(s, "level1")[...].get_now()
@@ -144,8 +149,8 @@ def test_write_multiscale_variety():
             write_ome_zarr_pyramid(
                 s,
                 "",
-                src,
                 axes,
+                PyramidData(src),
                 chunk_shape=chunk,
                 max_memory=max_memory,
             )
@@ -177,8 +182,8 @@ def test_write_multiscale_nlevels():
             write_ome_zarr_pyramid(
                 s,
                 "",
-                a,
                 "yx",
+                PyramidData(a),
                 nlevels=nlevels,
                 chunk_shape=chunk,
                 max_memory=max_memory,
@@ -275,7 +280,13 @@ def test_write_multiscale_depthfirst_max_memory():
         s = MemoryStore()
         steps = []
         write_ome_zarr_pyramid(
-            s, "", src, "yx", chunk_shape=chunk, max_memory=max_memory, steps=steps
+            s,
+            "",
+            "yx",
+            PyramidData(src),
+            chunk_shape=chunk,
+            max_memory=max_memory,
+            steps=steps,
         )
         got_steps = [(d["level"], d["nlevels"], d["kept_in_memory"]) for d in steps]
         assert got_steps == expected_steps, (max_memory, got_steps)
@@ -306,7 +317,13 @@ def test_write_multiscale_depthfirst_max_memory():
         s = MemoryStore()
         steps = []
         write_ome_zarr_pyramid(
-            s, "", src, "zyx", chunk_shape=chunk, max_memory=max_memory, steps=steps
+            s,
+            "",
+            "zyx",
+            PyramidData(src),
+            chunk_shape=chunk,
+            max_memory=max_memory,
+            steps=steps,
         )
         got_steps = [(d["level"], d["nlevels"], d["kept_in_memory"]) for d in steps]
         assert got_steps == expected_steps, (max_memory, got_steps)
@@ -345,7 +362,12 @@ def test_write_multiscale_dtype():
     for max_memory in [0, 1]:
         s = MemoryStore()
         write_ome_zarr_pyramid(
-            s, "", src, "yx", chunk_shape=chunk, dtype="uint8", max_memory=max_memory
+            s,
+            "",
+            "yx",
+            PyramidData(src, dtype="uint8"),
+            chunk_shape=chunk,
+            max_memory=max_memory,
         )
         for i in range(nlevels):
             arr = open_zarr(s, f"level{i}")
@@ -363,7 +385,12 @@ def test_write_multiscale_dtype():
     for max_memory in [0, 1]:
         s = MemoryStore()
         write_ome_zarr_pyramid(
-            s, "", src, "yx", chunk_shape=chunk, dtype="float32", max_memory=max_memory
+            s,
+            "",
+            "yx",
+            PyramidData(src, dtype="float32"),
+            chunk_shape=chunk,
+            max_memory=max_memory,
         )
         for i in range(nlevels):
             got = open_zarr(s, f"level{i}")[...].get_now()
@@ -387,7 +414,7 @@ def test_write_multiscale_int_chunk_shape():
         for max_memory in [0, 1]:
             s = MemoryStore()
             write_ome_zarr_pyramid(
-                s, "", src, axes, chunk_shape=4, max_memory=max_memory
+                s, "", axes, PyramidData(src), chunk_shape=4, max_memory=max_memory
             )
             for i in range(nlevels):
                 arr = open_zarr(s, f"level{i}")
@@ -396,8 +423,8 @@ def test_write_multiscale_int_chunk_shape():
 
 
 def test_write_multiscale_zarr_source():
-    # A ZarrArray in its own store as the source: the chunk_shape is inherited,
-    # and the pyramid can be written to a nested path in the target store.
+    # A ZarrArray in its own store as the source.
+    # the pyramid can be written to a nested path in the target store.
     zyx_shape = (40, 56)
     src = np.random.default_rng(42).random(zyx_shape).astype(np.float32)
 
@@ -412,7 +439,14 @@ def test_write_multiscale_zarr_source():
 
     for max_memory in [0, 1]:
         s = MemoryStore()
-        write_ome_zarr_pyramid(s, "my/pyramid", src_array, "yx", max_memory=max_memory)
+        write_ome_zarr_pyramid(
+            s,
+            "my/pyramid",
+            "yx",
+            PyramidData(src_array),
+            chunk_shape=8,
+            max_memory=max_memory,
+        )
         for i in range(nlevels):
             arr = open_zarr(s, f"my/pyramid/level{i}")
             assert arr.chunk_shape == (8, 8), (max_memory, i)
@@ -429,9 +463,8 @@ def test_write_multiscale_metadata():
     g = write_ome_zarr_pyramid(
         s,
         "pyr",
-        src,
         "tcyx",
-        name="myname",
+        PyramidData(src, name="myname"),
         space_unit="micrometer",
         base_scale=2.0,
         chunk_shape=(1, 1, 4, 4),
@@ -472,8 +505,8 @@ def test_write_multiscale_metadata():
     g = write_ome_zarr_pyramid(
         s,
         "",
-        src,
         "tcyx",
+        PyramidData(src),
         base_scale=(1.0, 0.5, 2.0, 4.0),
         chunk_shape=(1, 1, 4, 4),
         nlevels=2,
@@ -495,8 +528,8 @@ def test_write_multiscale_steps():
         write_ome_zarr_pyramid(
             s,
             "",
-            src,
             "yx",
+            PyramidData(src),
             chunk_shape=(4, 4),
             nlevels=1,
             max_memory=max_memory,
@@ -509,19 +542,302 @@ def test_write_multiscale_input_validation():
     src = np.zeros((8, 8), np.float32)
 
     with pytest.raises(TypeError):
-        write_ome_zarr_pyramid(MemoryStore(), "", "not an array", "yx")
+        write_ome_zarr_pyramid(MemoryStore(), "", "not a pyramid", "yx")
     with pytest.raises(ValueError):
         # 1D is not enough
-        write_ome_zarr_pyramid(MemoryStore(), "", np.zeros(8, np.float32), "yx")
+        write_ome_zarr_pyramid(
+            MemoryStore(), "", "yx", PyramidData(np.zeros(8, np.float32))
+        )
     with pytest.raises(ValueError):
         # axes length does not match the array
-        write_ome_zarr_pyramid(MemoryStore(), "", src, "zyx")
+        write_ome_zarr_pyramid(MemoryStore(), "", "zyx", PyramidData(src))
     with pytest.raises(ValueError):
         # not a valid combination of axes
-        write_ome_zarr_pyramid(MemoryStore(), "", src, "xyz")
+        write_ome_zarr_pyramid(MemoryStore(), "", "xyz", PyramidData(src))
     with pytest.raises(TypeError):
         # base_scale must be a float or a tuple of floats
-        write_ome_zarr_pyramid(MemoryStore(), "", src, "yx", base_scale=2)
+        write_ome_zarr_pyramid(MemoryStore(), "", "yx", PyramidData(src), base_scale=2)
+
+
+def test_write_multiscale_multiple_pyramids():
+    # Multiple pyramids in one ome-zarr file, each with their own data,
+    # stored at pyramid{i}/level{j}
+    shape = (40, 56)
+    chunk = (4, 4)
+    nlevels = _expected_auto_nlevels(shape, chunk)
+
+    rng = np.random.default_rng(42)
+    srcs = [
+        rng.random(shape).astype(np.float32),
+        rng.random(shape).astype(np.float32) * 2,
+        rng.random(shape).astype(np.float32) * 0.5,
+    ]
+    refs = []
+    for src in srcs:
+        ref = [src]
+        for _ in range(nlevels - 1):
+            ref.append(_downsample_reference(ref[-1], 2))
+        refs.append(ref)
+
+    for max_memory in [0, 1]:  # trigger simple and advanced alg, respectively
+        s = MemoryStore()
+        write_ome_zarr_pyramid(
+            s,
+            "",
+            "yx",
+            [PyramidData(src, name=f"pyr{i}") for i, src in enumerate(srcs)],
+            chunk_shape=chunk,
+            max_memory=max_memory,
+        )
+
+        # The single-pyramid paths do not exist
+        with pytest.raises(IOError):
+            open_zarr(s, f"level{nlevels - 1}")
+
+        for i, ref in enumerate(refs):
+            for j in range(nlevels):
+                arr = open_zarr(s, f"pyramid{i}/level{j}")
+                assert arr.shape == ref[j].shape, (max_memory, i, j)
+                assert arr.chunk_shape == chunk, (max_memory, i, j)
+                assert np.allclose(arr[...].get_now(), ref[j]), (max_memory, i, j)
+            with pytest.raises(IOError):
+                open_zarr(s, f"pyramid{i}/level{nlevels}")
+
+        # The pyramids contain different data
+        p0 = open_zarr(s, "pyramid0/level0")[...].get_now()
+        p1 = open_zarr(s, "pyramid1/level0")[...].get_now()
+        assert not np.allclose(p0, p1)
+
+
+def test_write_multiscale_multiple_pyramids_metadata():
+    # The ome metadata has one multiscales entry per pyramid
+    shape = (2, 16, 20)  # cyx
+    rng = np.random.default_rng(42)
+    srcs = [rng.random(shape).astype(np.float32), rng.random(shape).astype(np.float32)]
+
+    s = MemoryStore()
+    g = write_ome_zarr_pyramid(
+        s,
+        "my/pyramids",
+        "cyx",
+        [PyramidData(srcs[0], name="blobs"), PyramidData(srcs[1], name="rods")],
+        chunk_shape=(1, 4, 4),
+        nlevels=2,
+        space_unit="micrometer",
+        base_scale=2.0,
+    )
+
+    ms_list = g.attributes["ome"]["multiscales"]
+    assert [m["name"] for m in ms_list] == ["blobs", "rods"]
+    assert ms_list[0]["axes"] == ms_list[1]["axes"]
+    assert [ax["name"] for ax in ms_list[0]["axes"]] == ["c", "y", "x"]
+    for i, ms in enumerate(ms_list):
+        assert [d["path"] for d in ms["datasets"]] == [
+            f"pyramid{i}/level0",
+            f"pyramid{i}/level1",
+        ]
+        for j, d in enumerate(ms["datasets"]):
+            scale = d["coordinateTransformations"][0]["scale"]
+            assert scale == (1.0, 2.0 * 2**j, 2.0 * 2**j), (i, j)
+
+    # The metadata is also there when the group is opened again
+    reopened = open_zarr(s, "my/pyramids").attributes["ome"]["multiscales"]
+    assert [m["name"] for m in reopened] == ["blobs", "rods"]
+
+    # The arrays exist at the paths that the metadata points to
+    assert open_zarr(s, "my/pyramids/pyramid0/level0").shape == (2, 16, 20)
+    assert open_zarr(s, "my/pyramids/pyramid1/level1").shape == (2, 8, 10)
+
+
+def test_write_multiscale_multiple_pyramids_dtype_codecs():
+    # Each pyramid can have its own dtype and codecs, while the chunk shape
+    # and the scale are shared
+    rng = np.random.default_rng(42)
+    src = (rng.random((16, 24)) * 300).astype(np.float32)
+    src[0, 0] = 1000.0  # out of range for uint8
+
+    chunk = (4, 4)
+    nlevels = _expected_auto_nlevels((16, 24), chunk)
+
+    gzip_codecs = [
+        {"name": "bytes", "configuration": {"endian": "little"}},
+        {"name": "gzip", "configuration": {"level": 6}},
+    ]
+    s = MemoryStore()
+    write_ome_zarr_pyramid(
+        s,
+        "",
+        "yx",
+        [
+            PyramidData(src, name="default"),
+            PyramidData(src, name="uint8", dtype="uint8"),
+            PyramidData(src, name="uint16", dtype="uint16"),
+            PyramidData(src, name="gzip", dtype="uint8", codecs=gzip_codecs),
+        ],
+        chunk_shape=chunk,
+    )
+
+    # The uint8 and gzip pyramids have the same data, the others are cast
+    refs = {}
+    for dtype in ["uint8", "uint16", "float32"]:
+        ref = [_cast_reference(src, dtype)]
+        for _ in range(nlevels - 1):
+            ref.append(_cast_reference(_downsample_reference(ref[-1], 2), dtype))
+        refs[dtype] = ref
+
+    dtypes = ["float32", "uint8", "uint16", "uint8"]
+    for i, dtype in enumerate(dtypes):
+        for j in range(nlevels):
+            arr = open_zarr(s, f"pyramid{i}/level{j}")
+            assert arr.dtype == dtype, (i, j)
+            got = arr[...].get_now()
+            if dtype == "float32":
+                assert np.allclose(got, refs[dtype][j]), (i, j)
+            else:
+                assert np.array_equal(got, refs[dtype][j]), (i, j)
+            assert arr.chunk_shape == chunk, (i, j)
+
+    # Only the last pyramid has the gzip codecs
+    for i in range(4):
+        codecs = open_zarr(s, f"pyramid{i}/level0")._codecs
+        assert (codecs == gzip_codecs) == (i == 3), i
+
+
+def test_write_multiscale_pyramiddata():
+    # The PyramidData validates and converts its arguments
+    a = np.zeros((8, 8), np.float32)
+
+    # A numpy array is converted to an in-memory ZarrArray, and the
+    # dtype / fill_value / codecs are inherited from it
+    p = PyramidData(a, name="myname")
+    assert p.src_array.shape == (8, 8)
+    assert p.dtype == "float32"
+    assert p.name == "myname"
+    assert p.fill_value == 0.0
+    assert isinstance(p.codecs, list)
+
+    with pytest.raises(TypeError):
+        PyramidData("not an array")
+    with pytest.raises(ValueError):
+        # 1D is not enough
+        PyramidData(np.zeros(8, np.float32))
+    with pytest.raises(ValueError):
+        # 6D is too much
+        PyramidData(np.zeros((2,) * 6, np.float32))
+    with pytest.raises(TypeError):
+        PyramidData(a, name=42)
+
+
+def test_write_multiscale_multiple_pyramids_validation():
+    a = np.zeros((8, 8), np.float32)
+    b = np.zeros((8, 8), np.float32)
+
+    with pytest.raises(TypeError):
+        # not a list
+        write_ome_zarr_pyramid(MemoryStore(), "", "yx", "not a list")
+    with pytest.raises(TypeError):
+        # an empty list
+        write_ome_zarr_pyramid(MemoryStore(), "", "yx", [])
+    with pytest.raises(TypeError):
+        # not PyramidData instances
+        write_ome_zarr_pyramid(MemoryStore(), "", "yx", [a, b])
+    with pytest.raises(ValueError):
+        # different dimensionality
+        write_ome_zarr_pyramid(
+            MemoryStore(),
+            "",
+            "yx",
+            [PyramidData(a), PyramidData(np.zeros((8, 8, 8), np.float32))],
+        )
+    with pytest.raises(ValueError):
+        # different shapes
+        write_ome_zarr_pyramid(
+            MemoryStore(),
+            "",
+            "yx",
+            [PyramidData(a), PyramidData(np.zeros((8, 9), np.float32))],
+        )
+
+
+def test_write_multiscale_multiple_pyramids_steps():
+    # The steps are reported for each pyramid in the list
+    a = np.zeros((16, 16), np.float32)
+    b = np.ones((16, 16), np.float32)
+
+    for max_memory, kept in [(0, True), (1, False)]:
+        s = MemoryStore()
+        steps = []
+        write_ome_zarr_pyramid(
+            s,
+            "",
+            "yx",
+            [PyramidData(a, name="one"), PyramidData(b, name="two")],
+            chunk_shape=(4, 4),
+            nlevels=1,
+            max_memory=max_memory,
+            steps=steps,
+        )
+        assert steps == [
+            {"level": 0, "nlevels": 0, "kept_in_memory": kept},
+            {"level": 0, "nlevels": 0, "kept_in_memory": kept},
+        ]
+
+
+def test_write_multiscale_multiple_pyramids_group_nodes():
+    # Each pyramid subdirectory is itself a group node, so that the node
+    # tree can be traversed as groups. This used to be missing: only the
+    # level arrays existed, without a group node for the subdirectory.
+    shape = (16, 20)
+    srcs = [
+        np.zeros(shape, np.float32),
+        np.ones(shape, np.float32),
+    ]
+
+    s = MemoryStore()
+    write_ome_zarr_pyramid(
+        s,
+        "",
+        "yx",
+        [PyramidData(src, name=f"pyr{i}") for i, src in enumerate(srcs)],
+        chunk_shape=(4, 4),
+        nlevels=2,
+    )
+
+    # The subdirectories are plain groups, and the levels are reachable through them
+    for i in range(2):
+        g = open_zarr(s, f"pyramid{i}")
+        assert isinstance(g, ZarrGroup), i
+        assert g.attributes == {}, i
+        assert open_zarr(s, f"pyramid{i}/level0").shape == shape, i
+        assert open_zarr(s, f"pyramid{i}/level1").shape == (8, 10), i
+
+    # A single pyramid has no pyramid subdirectories
+    s = MemoryStore()
+    write_ome_zarr_pyramid(
+        s, "", "yx", PyramidData(srcs[0]), chunk_shape=(4, 4), nlevels=2
+    )
+    with pytest.raises(IOError):
+        open_zarr(s, "pyramid0")
+
+    # A custom prefix ends up in the group nodes, the array paths,
+    # and the metadata
+    s = MemoryStore()
+    write_ome_zarr_pyramid(
+        s,
+        "",
+        "yx",
+        [PyramidData(src) for src in srcs],
+        chunk_shape=(4, 4),
+        nlevels=2,
+        pyramid_path_prefix="multires",
+    )
+    g = open_zarr(s, "multires1")
+    assert isinstance(g, ZarrGroup)
+    assert open_zarr(s, "multires1/level1").shape == (8, 10)
+    with pytest.raises(IOError):
+        open_zarr(s, "pyramid0")
+    ms = open_zarr(s, "").attributes["ome"]["multiscales"]
+    assert ms[1]["datasets"][0]["path"] == "multires1/level0"
 
 
 if __name__ == "__main__":
