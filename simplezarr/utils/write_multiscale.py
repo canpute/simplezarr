@@ -240,6 +240,7 @@ def write_ome_zarr_pyramid(
 
     # Build dataset list, we append to this list during processing below
     dataset_lists = [[] for _ in pyramids]
+    pyramid_paths = []
 
     # Based on ome-zarr 0.5
     attributes = {
@@ -295,7 +296,9 @@ def write_ome_zarr_pyramid(
                 break
             array_path = f"{path_prefix}{level}"
             if len(pyramids) > 1:
-                array_path = f"{pyramid_path_prefix}{pyramid_index}/" + array_path
+                pyramid_path = f"{pyramid_path_prefix}{pyramid_index}"
+                array_path = pyramid_path + "/" + array_path
+                pyramid_paths.append(pyramid_path)
             new_array = simplezarr.ZarrArray.create(
                 store,
                 f"{path}/{array_path}",
@@ -343,6 +346,11 @@ def write_ome_zarr_pyramid(
                 max_memory,
                 steps,
             )
+
+    # Write a group for each pyramid subdirectory.
+    # Note that this currently are plain groups, we could make them ome-zarr groups, but maybe not because it would be an imcomplete file?
+    for pyramid_path in pyramid_paths:
+        simplezarr.ZarrGroup.create(store, f"{path}/{pyramid_path}")
 
     # Write toplevel ZarrGroup for this pyramid
     zarr_group = simplezarr.ZarrGroup.create(store, path, attributes=attributes)

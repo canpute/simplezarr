@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from simplezarr import MemoryStore, ZarrArray, open_zarr
+from simplezarr import MemoryStore, ZarrArray, ZarrGroup, open_zarr
 from simplezarr.utils.write_multiscale import (
     _get_levels_per_step,
     _step_nbytes,
@@ -781,6 +781,63 @@ def test_write_multiscale_multiple_pyramids_steps():
             {"level": 0, "nlevels": 0, "kept_in_memory": kept},
             {"level": 0, "nlevels": 0, "kept_in_memory": kept},
         ]
+
+
+def test_write_multiscale_multiple_pyramids_group_nodes():
+    # Each pyramid subdirectory is itself a group node, so that the node
+    # tree can be traversed as groups. This used to be missing: only the
+    # level arrays existed, without a group node for the subdirectory.
+    shape = (16, 20)
+    srcs = [
+        np.zeros(shape, np.float32),
+        np.ones(shape, np.float32),
+    ]
+
+    s = MemoryStore()
+    write_ome_zarr_pyramid(
+        s,
+        "",
+        "yx",
+        [PyramidData(src, name=f"pyr{i}") for i, src in enumerate(srcs)],
+        chunk_shape=(4, 4),
+        nlevels=2,
+    )
+
+    # The subdirectories are plain groups, and the levels are reachable through them
+    for i in range(2):
+        g = open_zarr(s, f"pyramid{i}")
+        assert isinstance(g, ZarrGroup), i
+        assert g.attributes == {}, i
+        assert open_zarr(s, f"pyramid{i}/level0").shape == shape, i
+        assert open_zarr(s, f"pyramid{i}/level1").shape == (8, 10), i
+
+    # A single pyramid has no pyramid subdirectories
+    s = MemoryStore()
+    write_ome_zarr_pyramid(
+        s, "", "yx", PyramidData(srcs[0]), chunk_shape=(4, 4), nlevels=2
+    )
+    with pytest.raises(IOError):
+        open_zarr(s, "pyramid0")
+
+    # A custom prefix ends up in the group nodes, the array paths,
+    # and the metadata
+    s = MemoryStore()
+    write_ome_zarr_pyramid(
+        s,
+        "",
+        "yx",
+        [PyramidData(src) for src in srcs],
+        chunk_shape=(4, 4),
+        nlevels=2,
+        pyramid_path_prefix="multires",
+    )
+    g = open_zarr(s, "multires1")
+    assert isinstance(g, ZarrGroup)
+    assert open_zarr(s, "multires1/level1").shape == (8, 10)
+    with pytest.raises(IOError):
+        open_zarr(s, "pyramid0")
+    ms = open_zarr(s, "").attributes["ome"]["multiscales"]
+    assert ms[1]["datasets"][0]["path"] == "multires1/level0"
 
 
 if __name__ == "__main__":
