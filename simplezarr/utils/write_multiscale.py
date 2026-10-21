@@ -29,6 +29,7 @@ from dataclasses import dataclass
 import numpy as np
 
 import simplezarr
+from simplezarr.utils.npzarrarray import NumpyZarrArray
 from simplezarr.utils.units import SPACE_UNITS, TIME_UNITS
 
 _DEFAULT_MAX_MEMORY = 1024**3  # == 2**30 == 1GiB
@@ -41,6 +42,7 @@ class PyramidData:
     Arguments:
         src_array : ZarrArray or np.ndarray
             The source array. An array of 2, 3, 4 or 5 dimensions (t, c, z, y, x).
+            A numpy array is wrapped in a read-only zero-copy view (NumpyZarrArray).
         name : str
             The name for the multi-scale pyramid. Default empty string.
         dtype : str
@@ -60,17 +62,12 @@ class PyramidData:
     codecs: list[dict] | None = None
 
     def __post_init__(self):
-        numpy_array = None
         src_array = self.src_array
 
         if isinstance(src_array, np.ndarray):
-            numpy_array = src_array
-            s = simplezarr.MemoryStore()
-            self.src_array = src_array = simplezarr.ZarrArray.create(
-                s, "", numpy_array.shape, numpy_array.dtype
-            )
-            src_array[...].set_now(numpy_array)
-        if not isinstance(src_array, simplezarr.ZarrArray):
+            # Wrap it, so that no copy of the data is made
+            self.src_array = src_array = NumpyZarrArray(src_array)
+        if not isinstance(src_array, (simplezarr.ZarrArray, NumpyZarrArray)):
             raise TypeError(
                 f"write_ome_zarr() Expected an array, got {src_array.__class__.__name__} {src_array}"
             )
@@ -84,16 +81,8 @@ class PyramidData:
         if self.dtype is None:
             self.dtype = src_array.dtype
         if self.fill_value is None:
-            if not isinstance(src_array, simplezarr.ZarrArray):
-                raise ValueError(
-                    "fill_value can only be omitted if the source array is a ZarrArray."
-                )
             self.fill_value = src_array._fill_value
         if self.codecs is None:
-            if not isinstance(src_array, simplezarr.ZarrArray):
-                raise ValueError(
-                    "codecs can only be omitted if the source array is a ZarrArray."
-                )
             self.codecs = src_array._codecs
 
 
