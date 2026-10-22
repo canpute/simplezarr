@@ -6,11 +6,10 @@ from concurrent.futures import Future
 
 import numpy as np
 
-from .misc import executor, DTYPES, resolve_fill_value
-from .stores import BaseStore, ReadableStore, WritableStore, ListableStore
-from .codecs import ArrayType, encode_array, decode_bytes
-from .indexing import ZarrArraySlice, ChunkGridIndexer
-
+from .codecs import ArrayType, decode_bytes, encode_array
+from .indexing import ChunkGridIndexer, ZarrArraySlice
+from .misc import DTYPES, executor, resolve_fill_value
+from .stores import BaseStore, ListableStore, ReadableStore, WritableStore
 
 __all__ = [
     "open_zarr",
@@ -599,7 +598,11 @@ class ZarrArray(ZarrNode):
             )
 
         # Load data. This could take a while if it's a remote/slow store
-        path = "c/" + self._chunk_path_separator.join(f"{x}" for x in index)
+        path = (
+            "c"
+            + self._chunk_path_separator
+            + self._chunk_path_separator.join(f"{x}" for x in index)
+        )
         if self._path:
             path = self._path + "/" + path
         try:
@@ -685,7 +688,11 @@ class ZarrArray(ZarrNode):
             )
 
         # Write (or erase) the chunk
-        path = "c/" + self._chunk_path_separator.join(f"{x}" for x in index)
+        path = (
+            "c"
+            + self._chunk_path_separator
+            + self._chunk_path_separator.join(f"{x}" for x in index)
+        )
         if self._path:
             path = self._path + "/" + path
         if check_empty and np.all(data == self._fill_value):
