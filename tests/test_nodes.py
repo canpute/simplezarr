@@ -566,6 +566,28 @@ def test_zarr_create_array():
     assert np.all(a1 == a2)
 
 
+def test_zarr_attributes():
+    # The attributes property is always a dict; also when the node
+    # has no attributes in its metadata (it used to be None for arrays).
+
+    g = open_zarr(store)
+
+    # Group with attributes
+    assert g.attributes == {"spam": "ham", "eggs": 42}
+
+    # Group without attributes
+    assert g["sub"].attributes == {}
+
+    # Array with attributes
+    a2 = g["sub/array2"]
+    assert a2.attributes == {"foo": True, "bar": "apples"}
+
+    # Array without attributes - this used to be None
+    a1 = g["sub/array1"]
+    assert isinstance(a1.attributes, dict)
+    assert a1.attributes == {}
+
+
 def test_zarr_array_codecs():
     s = MemoryStore()
 
