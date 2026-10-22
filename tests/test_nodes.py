@@ -91,7 +91,7 @@ store_data = {
             "dimension_names": ["y", "x"]
         }
         """.encode(),
-    "sub/array1/c/0-0-0": np.full((8, 6, 4), 100, np.uint16).tobytes(),
+    "sub/array1/c-0-0-0": np.full((8, 6, 4), 100, np.uint16).tobytes(),
     "sub/array2/c/0/0": np.full((50, 50), 1.0, np.float32).tobytes(),
     "sub/array2/c/0/1": np.full((50, 50), 2.0, np.float32).tobytes(),
     "sub/array2/c/1/0": np.full((50, 50), 3.0, np.float32).tobytes(),
@@ -272,6 +272,59 @@ def test_zarr_getting_and_setting_chunks_basic():
 
     a = arr.get_chunk_now((0, 2), True)
     assert a is not None  # the all-zero chunk IS actually stored
+
+
+def test_zarr_chunk_key_encoding():
+    # The Zarr v3 "default" chunk key encoding produces keys like
+    # "c<sep><i0><sep><i1>", e.g. "c/0/1" or "c.0.1". The "c" must be followed
+    # by the configured separator, not by a hardcoded "/".
+
+    data = np.full((2, 2), 7, np.uint8)
+    codecs = [{"name": "bytes", "configuration": {"endian": "little"}}]
+
+    # Writing a chunk must store it under the spec-compliant key
+
+    for sep in ["/", ".", "-"]:
+        s = MemoryStore()
+        arr = ZarrArray.create(
+            s,
+            "sub/array",
+            (4, 4),
+            np.uint8,
+            chunk_shape=(2, 2),
+            chunk_path_separator=sep,
+            codecs=codecs,
+        )
+        arr.set_chunk_now((0, 1), data)
+
+        assert set(s.dict.keys()) == {
+            "sub/array/zarr.json",
+            f"sub/array/c{sep}0{sep}1",
+        }
+
+        # And reading it back must work, too
+        assert np.all(arr.get_chunk_now((0, 1)) == 7)
+
+    # A chunk stored under the spec-compliant key (e.g. by another
+    # zarr implementation) must be readable
+
+    s = MemoryStore()
+    arr = ZarrArray.create(
+        s,
+        "sub/array",
+        (4, 4),
+        np.uint8,
+        chunk_shape=(2, 2),
+        chunk_path_separator=".",
+        codecs=codecs,
+    )
+    s.set("sub/array/c.0.1", data.tobytes())
+    assert np.all(arr.get_chunk_now((0, 1)) == 7)
+
+    # The old (non-compliant) key format must not be used nor found
+
+    with pytest.raises(IOError):
+        s.get("sub/array/c/0.1")
 
 
 def test_zarr_getting_and_setting_chunks_fails():
