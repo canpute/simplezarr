@@ -1,11 +1,10 @@
 from concurrent.futures import Future
 
-from simplezarr import MemoryStore, open_zarr, ZarrArray, ZarrArraySlice
-from simplezarr.indexing import normalize_selection
-
 import numpy as np
 import pytest
 
+from simplezarr import MemoryStore, ZarrArray, ZarrArraySlice, open_zarr
+from simplezarr.indexing import Aggregator, normalize_selection
 
 store_data = {
     "zarr.json": """
@@ -194,6 +193,37 @@ def test_index_out_of_bounds():
         arr[0, 28]
     with pytest.raises(IndexError, match="out of bounds"):
         arr[-41, 0]
+
+
+def test_aggregator_multiple_exceptions():
+    # When multiple chunk tasks fail, the first error is set on the
+    # aggregate future, and further set_exception() calls must be safe
+    # no-ops (the second call used to raise AttributeError in the worker,
+    # silently discarding that error).
+
+    fut = Future()
+    agg = Aggregator(fut, "result")
+    agg.add((0, 0))
+
+    agg.set_exception(ValueError("first failure"))
+    agg.set_exception(ValueError("second failure"))  # must not raise
+
+    with pytest.raises(ValueError, match="first failure"):
+        fut.result()
+
+
+def test_indexing_read_multiple_failing_chunks():
+    # End-to-end: a selection covering multiple corrupt chunks must
+    # surface the underlying error from the aggregate future.
+
+    store = MemoryStore(store_data.copy())
+    store.set("c/1/1", b"corrupt")
+    store.set("c/2/1", b"corrupt")
+    arr = open_zarr(store)
+    assert isinstance(arr, ZarrArray)
+
+    with pytest.raises(ValueError):
+        arr[10:30, 7:14].get_now()
 
 
 def test_indexing_read():
@@ -502,7 +532,6 @@ def test_empty_slice():
 
 
 def test_partial_chunk1():
-
     # Spec: Chunks at the border of an array always have the full chunk size, even when the array only covers parts of it.
 
     store = MemoryStore()
@@ -526,7 +555,6 @@ def test_partial_chunk1():
 
 
 def test_partial_chunk2():
-
     # Same as test_partial_chunk1, but for an edge-chunk specifically
 
     store = MemoryStore()
