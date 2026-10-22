@@ -17,14 +17,14 @@ drop, while other code determines what actually happens to the chunks.
 from __future__ import annotations
 
 import sys
-from typing import Generator, Callable, Literal
 from itertools import count as Count  # noqa: N812
+from typing import Callable, Generator, Literal
 
 import numpy as np
+
 import simplezarr
 from simplezarr.misc import logger
 from simplezarr.utils.multiscale import MultiscaleInfo, ScaleInfo
-
 
 __all__ = ["ChunkPool", "ChunkManager", "ChunkLocation"]
 
@@ -225,7 +225,7 @@ class ChunkPool:
                         i += 1
                         old_chunk = self._cached_chunks.pop(cached_keys[i], None)
                         if old_chunk is not None:
-                            to_destroy.append(chunk_location)
+                            to_destroy.append(old_chunk)
 
         for chunk_location in to_destroy:
             chunk_location._destroy()
