@@ -383,7 +383,6 @@ class BytesCodec(BaseCodec):
             flat = flat.byteswap()  # always copy bc flat may be a view
 
         # Turn into bytes and return as memoryview
-        # A view is zero-copy, and on the 1D flat array it produces flat uint8 bytes
         flat = flat.view(np.uint8).reshape(-1)
         return memoryview(flat)
 
