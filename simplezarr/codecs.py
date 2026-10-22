@@ -383,7 +383,7 @@ class BytesCodec(BaseCodec):
             flat = flat.byteswap()  # always copy bc flat may be a view
 
         # Turn into bytes and return as memoryview
-        flat.dtype = np.uint8
+        flat = flat.view(np.uint8).reshape(-1)
         return memoryview(flat)
 
     def decode(self, value: memoryview, decoded_representation_type: type) -> ndarray:

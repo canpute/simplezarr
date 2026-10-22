@@ -467,7 +467,7 @@ class ZarrArray(ZarrNode):
 
         # Parse optional fields
 
-        self._attributes = meta.get("attributes", None)
+        self._attributes = meta.get("attributes", {})
 
         # EXTENSION_POINT: storage_transformers
         self._storage_transformers = meta.get("storage_transformers", [])
