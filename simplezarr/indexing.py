@@ -225,9 +225,10 @@ class Aggregator:
             self._result = None
 
     def set_exception(self, err: Exception):
-        self._future.set_exception(err)
-        self._future = None
-        self._result = None
+        if self._future is not None:
+            self._future.set_exception(err)
+            self._future = None
+            self._result = None
 
 
 def read_chunk(zarr_array, aggregator, array, array_slices, chunk_index, chunk_slices):
