@@ -1,13 +1,13 @@
 from __future__ import annotations  # Using class names for types without Ruff F821
 
-from math import ceil
-from dataclasses import dataclass
 from concurrent.futures import Future
+from dataclasses import dataclass
+from math import ceil
 from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .misc import executor, ZarrFuture
+from .misc import ZarrFuture, executor
 
 if TYPE_CHECKING:
     from .nodes import ZarrArray
@@ -348,7 +348,7 @@ def normalize_selection(selection: tuple, shape: tuple[int, ...]) -> tuple:
     for axis in range(ndim):
         index = selection[axis]
         if isinstance(index, int):
-            if index < 0 or index > shape[axis]:
+            if index < 0 or index >= shape[axis]:
                 raise IndexError(
                     f"Index out of bounds: {get_selection_repr(selection, shape)}"
                 )

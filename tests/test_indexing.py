@@ -161,6 +161,41 @@ def test_normalize_selection():
         normalize_selection((0, -1000), shape2)
 
 
+def test_index_out_of_bounds():
+    # An int index equal to the shape is out of bounds, and must be
+    # reported at selection time (not later at chunk-loading time
+    # with a misleading "chunk grid" error).
+
+    shape = (40, 28)
+
+    # normalize_selection: the last valid index is fine
+    assert normalize_selection((39, 27), shape) == (39, 27)
+    assert normalize_selection((-40, -1), shape) == (0, 27)
+
+    # ... but an index equal to the shape (or larger) fails
+    with pytest.raises(IndexError):
+        normalize_selection((40, 0), shape)
+    with pytest.raises(IndexError):
+        normalize_selection((0, 28), shape)
+    with pytest.raises(IndexError):
+        normalize_selection((1000, 0), shape)
+
+    # The same at the array level: slicing must raise immediately
+    store = MemoryStore(store_data.copy())
+    arr = open_zarr(store)
+    assert isinstance(arr, ZarrArray)
+
+    a = arr[39, 27].get_now()
+    assert a == 133
+
+    with pytest.raises(IndexError, match="out of bounds"):
+        arr[40, 0]
+    with pytest.raises(IndexError, match="out of bounds"):
+        arr[0, 28]
+    with pytest.raises(IndexError, match="out of bounds"):
+        arr[-41, 0]
+
+
 def test_indexing_read():
     store = MemoryStore(store_data.copy())
     arr = open_zarr(store)
