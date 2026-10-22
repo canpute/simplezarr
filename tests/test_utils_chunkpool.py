@@ -467,6 +467,56 @@ def test_chunk_caching():
     assert len(list(pool.iter_chunks())) == 0
 
 
+def test_chunk_caching_eviction():
+    # When the cache overflows, the *oldest* cached chunk must be evicted
+    # (destroyed), while the chunk that was just dropped stays intact in
+    # the cache.
+
+    pools = ChunkPool.from_zarr_node(open_zarr(store), cache_size=1)
+    pool = pools[0]
+
+    events = []
+
+    def on_destroy(chunk_location):
+        events.append(f"destroy {chunk_location.index}")
+
+    chunk1 = pool.get_chunk(0, (0, 0), "r1", destroy_handler=on_destroy)
+    chunk2 = pool.get_chunk(0, (0, 1), "r2", destroy_handler=on_destroy)
+
+    pool.wait_for_chunks_to_load()
+    assert pool.memory_usage == 20000
+
+    # Drop chunk1, which becomes the (only) cached chunk
+    pool.drop_chunk(0, (0, 0), "r1")
+
+    assert events == []
+    assert len(pool._cached_chunks) == 1
+    assert chunk1 in pool.iter_chunks()
+
+    # Drop chunk2, which evicts chunk1 from the cache
+    pool.drop_chunk(0, (0, 1), "r2")
+
+    assert events == ["destroy (0, 0)"]  # the evicted chunk is destroyed
+    assert len(pool._cached_chunks) == 1
+    assert pool.memory_usage == 10000
+    assert chunk1 not in pool.iter_chunks()
+    assert chunk2 in pool.iter_chunks()
+
+    # The surviving (just-cached) chunk must be intact and usable
+    chunk2.wait()  # raises AttributeError if it was destroyed
+    assert chunk2.data.max() == 2
+
+    # Getting it again returns the same, still-working chunk
+    chunk2b = pool.get_chunk(0, (0, 1), "r2")
+    assert chunk2b is chunk2
+    assert chunk2b.data.max() == 2
+
+    # Destroy
+    pool.destroy()
+    assert events == ["destroy (0, 0)", "destroy (0, 1)"]
+    assert pool.memory_usage == 0
+
+
 if __name__ == "__main__":
     for func in list(globals().values()):
         if callable(func) and func.__name__.startswith("test_"):
