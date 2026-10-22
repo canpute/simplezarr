@@ -297,7 +297,9 @@ def test_scale_infos_out_of_order(caplog):
     # A spec-compliant file does not warn
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="simplezarr"):
-        infos = MultiscaleInfo.from_zarr_node(open_zarr(MemoryStore(store_data2.copy())))
+        infos = MultiscaleInfo.from_zarr_node(
+            open_zarr(MemoryStore(store_data2.copy()))
+        )
     assert [si.level for si in infos[0].scales] == [0, 1, 2]
     assert "not ordered" not in caplog.text
 
