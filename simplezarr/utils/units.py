@@ -15,11 +15,11 @@ SI_PREFIX_TUPLES = [
     ("milli", 1e-3, "m"),
     ("micro", 1e-6, "µ"),
     ("nano", 1e-9, "n"),
-    ("pico", 1e-1, "p"),
-    ("femto", 1e-1, "f"),
-    ("atto", 1e-1, "a"),
-    ("zepto", 1e-2, "z"),
-    ("yocto", 1e-2, "y"),
+    ("pico", 1e-12, "p"),
+    ("femto", 1e-15, "f"),
+    ("atto", 1e-18, "a"),
+    ("zepto", 1e-21, "z"),
+    ("yocto", 1e-24, "y"),
 ]
 
 # SI Units as specified by ome-zarr / UDUNITS-2
