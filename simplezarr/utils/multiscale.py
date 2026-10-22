@@ -307,6 +307,20 @@ def create_scale_infos_from_ome_zarr_group(
         # Sort, by highest res first
         # The “path's MUST be ordered from largest (i.e. highest resolution) to smallest, but we sort anyway
         scale_infos.sort(key=lambda si: si.mean_scale)
+
+        # Because of the sorting, the level of each scale may no longer match
+        # its position in the list. If so, the file did not order its datasets
+        # from highest to lowest resolution, which is against the ome-zarr spec.
+        # We correct the levels and show a warning.
+        if any(si.level != i for i, si in enumerate(scale_infos)):
+            logger.warning(
+                f"{MSG_PREFIX}: the datasets of multiscale image {name!r} are not ordered "
+                "from highest to lowest resolution, which does not follow the ome-zarr "
+                "spec; correcting the scale levels."
+            )
+            for i, si in enumerate(scale_infos):
+                si.level = i
+
         multiscale_images.append(
             MultiscaleInfo(
                 name=name,

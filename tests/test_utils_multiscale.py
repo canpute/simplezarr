@@ -1,3 +1,6 @@
+import json
+import logging
+
 from simplezarr import MemoryStore, open_zarr, ZarrArray
 from simplezarr.utils.multiscale import MultiscaleInfo, ScaleInfo
 
@@ -261,6 +264,42 @@ def test_scale_infos_from_zarr_node2():
     assert si.spatial_shape == (25, 25)
     assert si.nchannels == 2
     assert si.ntimes == 0
+
+
+def test_scale_infos_out_of_order(caplog):
+    # Test a multiscale file whose datasets are listed lowest-resolution
+    # first. This is against the ome-zarr spec; the scales are re-ordered,
+    # the levels corrected, and a warning is shown.
+
+    temp_store_data = store_data2.copy()
+    metadata = json.loads(temp_store_data["zarr.json"].decode())
+    metadata["attributes"]["ome"]["multiscales"][0]["datasets"].reverse()
+    temp_store_data["zarr.json"] = json.dumps(metadata).encode()
+
+    store = MemoryStore(temp_store_data)
+    g = open_zarr(store)
+
+    with caplog.at_level(logging.WARNING, logger="simplezarr"):
+        infos = MultiscaleInfo.from_zarr_node(g)
+
+    assert len(infos) == 1
+    info = infos[0]
+    assert len(info.scales) == 3
+
+    # The scales are ordered (and leveled) by resolution, not by listing order
+    assert [si.mean_scale for si in info.scales] == [1, 2, 4]
+    assert [si.level for si in info.scales] == [0, 1, 2]
+    assert [si.spatial_shape for si in info.scales] == [(100, 100), (50, 50), (25, 25)]
+
+    # And a warning was shown
+    assert "not ordered" in caplog.text
+
+    # A spec-compliant file does not warn
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="simplezarr"):
+        infos = MultiscaleInfo.from_zarr_node(open_zarr(MemoryStore(store_data2.copy())))
+    assert [si.level for si in infos[0].scales] == [0, 1, 2]
+    assert "not ordered" not in caplog.text
 
 
 def test_scale_infos_from_zarr_node_transforms():
