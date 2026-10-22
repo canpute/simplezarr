@@ -24,8 +24,9 @@
 # than "/a/b". We follow this in the stores.
 
 from __future__ import annotations
-from pathlib import Path
+
 import time
+from pathlib import Path
 
 __all__ = [
     "BaseStore",
@@ -200,7 +201,7 @@ class WritableStore(BaseStore):
         # Default implementation, using .get()
         for key, i1, value in key_start_values:
             i2 = i1 + len(value)
-            full_value = self._get(key)
+            full_value = self._get(key)  # Note: assumes readable store
             if not isinstance(value, bytes):
                 value = value.tobytes()
             full_value = full_value[:i1] + value + full_value[i2:]
@@ -378,7 +379,9 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
         for key, start, length in key_ranges:
             p = self._path.joinpath(*key.split("/"))
             if not p.is_file():
-                raise IOError(f"Key {key!r} does not exist.")
+                raise IOError(
+                    f"Key {key!r} does not exist (for getting partial value)."
+                )
             with p.open("rb") as f:
                 f.seek(start)
                 result.append(f.read(length))
@@ -394,7 +397,10 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
     def _set_partial_values(self, key_start_values: List[tuple[str, int, bytes]]):
         for key, start, value in key_start_values:
             p = self._path.joinpath(*key.split("/"))
-            p.parent.mkdir(parents=False, exist_ok=True)
+            if not p.is_file():
+                raise IOError(
+                    f"Key {key!r} does not exist (for setting partial value)."
+                )
             if isinstance(value, memoryview) and not value.c_contiguous:
                 value = value.tobytes()
             with p.open("r+b") as f:
