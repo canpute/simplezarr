@@ -72,9 +72,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import simplezarr
-from simplezarr.utils.units import SPACE_UNITS
 from simplezarr.misc import logger
-
+from simplezarr.utils.units import SPACE_UNITS
 
 __all__ = ["MultiscaleInfo", "ScaleInfo"]
 
@@ -217,7 +216,7 @@ def create_scale_infos_from_ome_zarr_group(
             time_dim = 0
         if axes_types[0] == "channel":
             channel_dim = 0
-        elif axes_types[1] == "channel":
+        elif len(axes_types) > 1 and axes_types[1] == "channel":
             channel_dim = 1
 
         # Get and check unit - # SHOULD field

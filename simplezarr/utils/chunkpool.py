@@ -108,7 +108,7 @@ class ChunkPool:
             self._call_soon_threadsafe = call_soon_threadsafe
         else:  # no-cover
             raise TypeError(
-                "CheckPool.enable_async_load_handlers(): unexpected call_soon_threadsafe value: {call_soon_threadsafe!r}"
+                f"CheckPool.enable_async_load_handlers(): unexpected call_soon_threadsafe value: {call_soon_threadsafe!r}"
             )
 
     def destroy(self):
@@ -358,6 +358,7 @@ class ChunkLocation:
         """The data (numpy array) for this chunk.
 
         When this property is accessed before the data is loaded, a RuntimeError is raised.
+        Note that the chunk may be readonly.
         """
         if self._data is None:
             if not self._future.done():
@@ -374,6 +375,8 @@ class ChunkLocation:
 
     def wait(self):
         """Synchronously wait for the chunk's data to load."""
+        if self._future is None:
+            return  # already destroyed
         self._future.result()
         self._process_load_handlers()
 

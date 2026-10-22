@@ -91,7 +91,7 @@ def check_prefix(ob: object, method: str, prefix: str) -> str:
 def check_key_range(ob: object, key_range) -> tuple[str, int, int | None]:
     if not (isinstance(key_range, tuple) and len(key_range) == 3):
         raise TypeError(
-            "f{ob.__class__.__name__}.get_partial_values(): key_ranges entries must be 3-element tuples."
+            f"f{ob.__class__.__name__}.get_partial_values(): key_ranges entries must be 3-element tuples."
         )
     return key_range
 
@@ -99,7 +99,7 @@ def check_key_range(ob: object, key_range) -> tuple[str, int, int | None]:
 def check_key_start_value(ob: object, key_start_value) -> tuple[str, int, bytes]:
     if not (isinstance(key_start_value, tuple) and len(key_start_value) == 3):
         raise TypeError(
-            "f{ob.__class__.__name__}.set_partial_values(): key_start_values entries must be 3-element tuples."
+            f"f{ob.__class__.__name__}.set_partial_values(): key_start_values entries must be 3-element tuples."
         )
     return key_start_value
 
@@ -330,10 +330,21 @@ class MemoryStore(ReadableStore, WritableStore, ListableStore):
 
     def _set(self, key: str, value: bytes):
         dir = ""
-        for d in key.split("/")[:-1]:
-            dir += f"{d}/"
-            if dir[:-1] in self._dict:
-                raise IOError(f"Cannot set {key!r} because {dir[:-1]!r} exists.")
+        if key in self._dict:
+            pass  # overwrite existing key
+        else:
+            # Make sure no keys exists that we consider 'dirs'
+            for d in key.split("/")[:-1]:
+                dir += f"{d}/"
+                if dir[:-1] in self._dict:
+                    raise IOError(f"Cannot set {key!r} because {dir[:-1]!r} exists.")
+            # Make sure no keys exist that consider this key a dir
+            key_as_dir = key + "/"
+            sub_keys = [k for k in self._dict.keys() if k.startswith(key_as_dir)]
+            if sub_keys:
+                raise IOError(
+                    f"Cannot set {key!r} because it is a 'directory', for e.g. '{sub_keys[0]}'."
+                )
         if not isinstance(value, bytes):  # only store as bytes
             value = value.tobytes()
         self._dict[key] = value
@@ -496,7 +507,7 @@ class WrapperStore(ReadableStore, WritableStore, ListableStore):
 
     def _erase_prefix(self, prefix: str):
         result = self._sub._erase_prefix(prefix)
-        self._hook("erase_prefix", (prefix), result)
+        self._hook("erase_prefix", (prefix,), result)
         return result
 
     def _list(self) -> list[str]:

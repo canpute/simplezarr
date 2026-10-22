@@ -429,7 +429,7 @@ class ZarrArray(ZarrNode):
         if not (
             dtype in DTYPES or (dtype.startswith("r") and dtype[1:].isnumeric())
         ):  # no-cover
-            raise RuntimeError("Zarr dtype extension {dtype!r} is not supported.")
+            raise RuntimeError(f"Zarr dtype extension {dtype!r} is not supported.")
         i = len(dtype)
         while i > 0 and dtype[i - 1].isdigit():
             i -= 1
@@ -442,7 +442,7 @@ class ZarrArray(ZarrNode):
         self._chunk_grid = meta["chunk_grid"]
         name = self._chunk_grid["name"]
         if name != "regular":  # no-cover
-            raise RuntimeError("Zarr chunk_grid extension {name!r} is not supported.")
+            raise RuntimeError(f"Zarr chunk_grid extension {name!r} is not supported.")
         self._chunk_shape = tuple(self._chunk_grid["configuration"]["chunk_shape"])
 
         self._chunk_grid_shape = tuple(
@@ -455,7 +455,7 @@ class ZarrArray(ZarrNode):
         name = self._chunk_key_encoding["name"]
         if name != "default":  # no-cover
             raise RuntimeError(
-                "Zarr chunk_key_encoding extension {name!r} is not supported."
+                f"Zarr chunk_key_encoding extension {name!r} is not supported."
             )
         self._chunk_path_separator = self._chunk_key_encoding["configuration"][
             "separator"
