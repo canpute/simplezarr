@@ -585,7 +585,8 @@ def _downsample_to_shape(data, new_shape, zyx_ndim, method, inner_indices):
     subslices2 = tuple(slice(0, s, 1) for s in new_zyx_shape)
     subslices1 = tuple(slice(0, s.stop * 2, 1) for s in subslices2)
     for index in inner_indices:  # for each time/channel combi
-        new_data[*index, *subslices2] = _downsample(data[*index, *subslices1], method)
+        target_view = new_data[*index, *subslices2]
+        _downsample(data[*index, *subslices1], method, target_view)
     return new_data
 
 
@@ -615,7 +616,7 @@ def _get_inner_indices(tc_shape):
     return inner_indices
 
 
-def _downsample(a, method):
+def _downsample(a, method, dst):
     assert method == "local_mean"  # only one method implemented right now
     if a.ndim == 2:
         b = a[::2, ::2].astype(float)
@@ -639,4 +640,4 @@ def _downsample(a, method):
         np.rint(b, out=b)
         np.clip(b, info.min, info.max, out=b)
 
-    return b.astype(a.dtype)
+    np.copyto(dst, b, casting="unsafe")
