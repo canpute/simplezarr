@@ -340,7 +340,7 @@ class MemoryStore(ReadableStore, WritableStore, ListableStore):
                     raise IOError(f"Cannot set {key!r} because {dir[:-1]!r} exists.")
             # Make sure no keys exist that consider this key a dir
             key_as_dir = key + "/"
-            sub_keys = [k for k in self._dict.keys() if k.startswith(key_as_dir)]
+            sub_keys = [k for k in list(self._dict.keys()) if k.startswith(key_as_dir)]
             if sub_keys:
                 raise IOError(
                     f"Cannot set {key!r} because it is a 'directory', for e.g. '{sub_keys[0]}'."
