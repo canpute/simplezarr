@@ -125,8 +125,13 @@ def encode_array(array: ndarray, codec_dicts: list[dict]) -> memoryview:
         codec_dicts, array_type
     )
 
+    return _encode_with_codecs(array, codecs, decoded_representation_types)
+
+
+def _encode_with_codecs(
+    value: ndarray, codecs: list[BaseCodec], decoded_representation_types: list[type]
+) -> memoryview:
     # Encode
-    value = array
     assert issubclass(decoded_representation_types[0], ArrayType)
     assert decoded_representation_types[0].match(value)
     for i in range(len(codecs)):
@@ -156,11 +161,15 @@ def decode_bytes(
     )
 
     # When decoding, the steps are applied in reverse order!
-    codecs.reverse()
-    decoded_representation_types.reverse()
+    return _decode_with_codecs(
+        encoded_bytes, codecs[::-1], decoded_representation_types[::-1]
+    )
 
+
+def _decode_with_codecs(
+    value: memoryview, codecs: list[BaseCodec], decoded_representation_types: list[type]
+) -> ndarray:
     # Decode
-    value = encoded_bytes
     assert decoded_representation_types[0] is memoryview
     for i in range(len(codecs)):
         value = codecs[i].decode(value, decoded_representation_types[i + 1])

@@ -6,7 +6,12 @@ from concurrent.futures import Future
 
 import numpy as np
 
-from .codecs import ArrayType, decode_bytes, encode_array
+from .codecs import (
+    ArrayType,
+    _decode_with_codecs,
+    _encode_with_codecs,
+    resolve_codecs_from_dicts,
+)
 from .indexing import ChunkGridIndexer, ZarrArraySlice
 from .misc import DTYPES, executor, resolve_fill_value
 from .stores import BaseStore, ListableStore, ReadableStore, WritableStore
@@ -464,6 +469,7 @@ class ZarrArray(ZarrNode):
         # EXTENSION_POINT: codecs
         self._codecs = meta["codecs"]
         assert len(self._codecs) >= 1
+        self._codecs_resolved = None  # resolved and cached when first used
 
         # Parse optional fields
 
@@ -568,6 +574,21 @@ class ZarrArray(ZarrNode):
             "ZarrArray does not support index assignment (``a[..] = foo``), instead use ``a[..].set_now(foo)`` or ``a[..].set_soon(foo)``."
         )
 
+    def _get_codecs_resolved(self) -> tuple:
+        """Get the codecs and representation types, resolved and cached.
+
+        The codecs (and the types of their representations) are the same
+        for every chunk of this array, so they are resolved and validated
+        only once, and the codec instances are shared between chunk
+        operations. Returns a 4-tuple with the codecs and types in encoding
+        order, followed by the same in reversed (i.e. decoding) order.
+        """
+        if self._codecs_resolved is None:
+            array_type = ArrayType.create(self._chunk_shape, self._dtype)
+            codecs, types = resolve_codecs_from_dicts(self._codecs, array_type)
+            self._codecs_resolved = (codecs, types, codecs[::-1], types[::-1])
+        return self._codecs_resolved
+
     def get_chunk_now(self, index, none_if_missing=False) -> np.ndarray | None:
         """Read a chunk from the store.
 
@@ -612,8 +633,12 @@ class ZarrArray(ZarrNode):
 
         # Return decoded
         if encoded_bytes is not None:
-            array_type = ArrayType.create(self._chunk_shape, self._dtype)
-            return decode_bytes(memoryview(encoded_bytes), self._codecs, array_type)
+            _codecs, _types, codecs_reversed, types_reversed = (
+                self._get_codecs_resolved()
+            )
+            return _decode_with_codecs(
+                memoryview(encoded_bytes), codecs_reversed, types_reversed
+            )
         elif none_if_missing:
             return None
         else:
@@ -701,7 +726,10 @@ class ZarrArray(ZarrNode):
             except IOError:
                 pass
         else:
-            encoded_bytes = encode_array(data, self._codecs)
+            codecs, types, _codecs_reversed, _types_reversed = (
+                self._get_codecs_resolved()
+            )
+            encoded_bytes = _encode_with_codecs(data, codecs, types)
             self._store.set(path, encoded_bytes)
 
     def set_chunk_soon(self, index, data) -> Future[None]:
