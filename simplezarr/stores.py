@@ -342,9 +342,7 @@ class MemoryStore(ReadableStore, WritableStore, ListableStore):
                 self._dirs.add(dir)
             # Make sure no keys exist that consider this key a dir
             if (key + "/") in self._dirs:
-                raise IOError(
-                    f"Cannot set {key!r} because it is a 'directory', for e.g. '{sub_keys[0]}'."
-                )
+                raise IOError(f"Cannot set {key!r} because it is a directory.")
         if not isinstance(value, bytes):  # only store as bytes
             value = value.tobytes()
         self._dict[key] = value
