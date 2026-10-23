@@ -308,6 +308,7 @@ class MemoryStore(ReadableStore, WritableStore, ListableStore):
 
     def __init__(self, fields: dict | None = None):
         self._dict = {}
+        self._dirs = set()  # keep track of directories
         if fields:
             for k, v in fields.items():
                 self.set(k, v)
@@ -329,19 +330,18 @@ class MemoryStore(ReadableStore, WritableStore, ListableStore):
             raise IOError(f"get(): key {key!r} does not exist.") from None
 
     def _set(self, key: str, value: bytes):
-        dir = ""
         if key in self._dict:
             pass  # overwrite existing key
         else:
             # Make sure no keys exists that we consider 'dirs'
+            dir = ""
             for d in key.split("/")[:-1]:
                 dir += f"{d}/"
                 if dir[:-1] in self._dict:
                     raise IOError(f"Cannot set {key!r} because {dir[:-1]!r} exists.")
+                self._dirs.add(dir)
             # Make sure no keys exist that consider this key a dir
-            key_as_dir = key + "/"
-            sub_keys = [k for k in list(self._dict.keys()) if k.startswith(key_as_dir)]
-            if sub_keys:
+            if (key + "/") in self._dirs:
                 raise IOError(
                     f"Cannot set {key!r} because it is a 'directory', for e.g. '{sub_keys[0]}'."
                 )
@@ -354,6 +354,7 @@ class MemoryStore(ReadableStore, WritableStore, ListableStore):
             self._dict.pop(key)
         except KeyError:
             raise IOError(f"erase(): key {key!r} does not exist.") from None
+        # Note: it would be good to remove from self._dirs for dirs that are now empty. For now we don't bother.
 
     def _list(self) -> list[str]:
         return sorted(self._dict.keys())
