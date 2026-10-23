@@ -276,6 +276,12 @@ def write_ome_zarr_pyramid(
         zyx_scale = src_zyx_scale
         prev_zyx_shape = zyx_shape
 
+        pyramid_path = None
+        if len(pyramids) > 1:
+            pyramid_path = f"{pyramid_path_prefix}{pyramid_index}"
+            pyramid_paths.append(pyramid_path)
+
+        # Note the implicit level cap, but it's huge, even for massive data
         for level in range(100):
             if level > 0:
                 prev_zyx_shape = zyx_shape
@@ -295,10 +301,8 @@ def write_ome_zarr_pyramid(
             elif level >= nlevels:
                 break
             array_path = f"{path_prefix}{level}"
-            if len(pyramids) > 1:
-                pyramid_path = f"{pyramid_path_prefix}{pyramid_index}"
+            if pyramid_path:
                 array_path = pyramid_path + "/" + array_path
-                pyramid_paths.append(pyramid_path)
             new_array = simplezarr.ZarrArray.create(
                 store,
                 f"{path}/{array_path}",

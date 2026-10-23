@@ -61,6 +61,9 @@ class StoreThatFillsTheGaps:
             dir += f"{d}/"
             if dir[:-1] in self._store:
                 raise IOError(f"Cannot set {key!r} because {dir[:-1]!r} exists.")
+        key_as_dir = key + "/"
+        if any(k.startswith(key_as_dir) for k in self._store.keys()):
+            raise IOError(f"Cannot set {key!r} because its a dir.")
         if not isinstance(value, bytes):
             value = value.tobytes()
         self._store[key] = value
@@ -237,6 +240,8 @@ def test_write(cls):
         store.set("foo/eggs", b"hi eggs")
     with pytest.raises(IOError):
         store.set("dir2/sub/bar/eggs", b"hi eggs")
+    with pytest.raises(IOError):
+        store.set("dir2", b"hi dir2")
 
     # Erase
 
