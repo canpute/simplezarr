@@ -22,6 +22,7 @@ Examples:
 """
 
 import itertools
+import json
 import math
 from collections import deque
 from dataclasses import dataclass
@@ -238,26 +239,8 @@ def write_ome_zarr_pyramid(
         "description": f"Pyramid build with simplezarr.utils.pyramid using the {method!r} method"
     }
 
-    # Build dataset list, we append to this list during processing below
-    dataset_lists = [[] for _ in pyramids]
-    pyramid_paths = []
-
-    # Based on ome-zarr 0.5
-    attributes = {
-        "ome": {
-            "version": "0.5",
-            "multiscales": [
-                {
-                    "name": pyramids[i].name,
-                    "axes": axes_list,
-                    "datasets": dataset_lists[i],
-                    "type": method,
-                    "metadata": downsample_metadata,
-                }
-                for i in range(len(pyramids))
-            ],
-        }
-    }
+    # Build multiscales list (jsonable dicts), we append to this list during processing below
+    multiscales: list[dict] = []  # one for each pyramid
 
     # Prepare arrays
 
@@ -276,10 +259,7 @@ def write_ome_zarr_pyramid(
         zyx_scale = src_zyx_scale
         prev_zyx_shape = zyx_shape
 
-        pyramid_path = None
-        if len(pyramids) > 1:
-            pyramid_path = f"{pyramid_path_prefix}{pyramid_index}"
-            pyramid_paths.append(pyramid_path)
+        datasets: list[dict] = []  # one for each level
 
         # Note the implicit level cap, but it's huge, even for massive data
         for level in range(100):
@@ -301,7 +281,8 @@ def write_ome_zarr_pyramid(
             elif level >= nlevels:
                 break
             array_path = f"{path_prefix}{level}"
-            if pyramid_path:
+            if len(pyramids) > 1:
+                pyramid_path = f"{pyramid_path_prefix}{pyramid_index}"
                 array_path = pyramid_path + "/" + array_path
             new_array = simplezarr.ZarrArray.create(
                 store,
@@ -319,7 +300,7 @@ def write_ome_zarr_pyramid(
             zyx_translation = tuple(
                 zyx_scale[i] / 2 - src_zyx_scale[i] / 2 for i in range(zyx_ndim)
             )
-            d = {
+            dataset_dict = {
                 "path": array_path,
                 "coordinateTransformations": [
                     {"type": "scale", "scale": (*tc_scale, *zyx_scale)},
@@ -329,7 +310,16 @@ def write_ome_zarr_pyramid(
                     },
                 ],
             }
-            dataset_lists[pyramid_index].append(d)
+            datasets.append(dataset_dict)
+
+        multiscale_dict = {
+            "name": pyramids[pyramid_index].name,
+            "axes": axes_list,
+            "datasets": datasets,
+            "type": method,
+            "metadata": downsample_metadata,
+        }
+        multiscales.append(multiscale_dict)
 
         max_memory = int(max_memory)
         if max_memory <= 0:
@@ -351,13 +341,45 @@ def write_ome_zarr_pyramid(
                 steps,
             )
 
-    # Write a group for each pyramid subdirectory.
-    # Note that this currently are plain groups, we could make them ome-zarr groups, but maybe not because it would be an imcomplete file?
-    for pyramid_path in pyramid_paths:
-        simplezarr.ZarrGroup.create(store, f"{path}/{pyramid_path}")
+    # Write groups
 
-    # Write toplevel ZarrGroup for this pyramid
-    zarr_group = simplezarr.ZarrGroup.create(store, path, attributes=attributes)
+    # Based on ome-zarr 0.5
+    def make_attributes(multiscales: list) -> dict:
+        return {
+            "ome": {
+                "version": "0.5",
+                "multiscales": json.loads(json.dumps(multiscales)),  # deep copy
+            }
+        }
+
+    if len(pyramids) > 1:
+        assert len(multiscales) == len(pyramids)
+        # Write toplevel Zarr group
+        attributes = make_attributes(multiscales)
+        zarr_group = simplezarr.ZarrGroup.create(store, path, attributes=attributes)
+
+        # Write ome-zarr group for each pyramid, so tools that assume a single pyramid can still read the individual ones
+        for pyramid_index, multiscale in enumerate(multiscales):
+            pyramid_path = f"{pyramid_path_prefix}{pyramid_index}"
+            # Fix paths (strip parent dir to make it relative to the subdir)
+            for dataset in multiscale["datasets"]:
+                p = dataset["path"]
+                assert p.startswith(pyramid_path + "/")
+                dataset["path"] = p[len(pyramid_path) + 1 :]
+            # Write
+            attributes = make_attributes([multiscale])
+            simplezarr.ZarrGroup.create(
+                store, f"{path}/{pyramid_path}", attributes=attributes
+            )
+
+    elif len(pyramids) == 1:
+        # Write single ome Zarr group (the pyramid_path_prefix is not applied in the above code)
+        assert len(multiscales) == 1
+        attributes = make_attributes(multiscales)
+        zarr_group = simplezarr.ZarrGroup.create(store, path, attributes=attributes)
+
+    else:  # len pyramids is zero?
+        zarr_group = None
 
     return zarr_group
 
