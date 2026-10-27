@@ -9,7 +9,7 @@ SI_PREFIX_TUPLES = [
     ("mega", 1e6, "M"),
     ("kilo", 1e3, "k"),
     ("hecto", 100, "h"),
-    ("deka", 10, "a"),
+    ("deka", 10, "da"),
     ("deci", 0.1, "d"),
     ("centi", 0.01, "c"),
     ("milli", 1e-3, "m"),
