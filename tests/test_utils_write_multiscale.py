@@ -488,14 +488,14 @@ def test_write_multiscale_metadata():
     for i, d in enumerate(datasets):
         scale, translation = d["coordinateTransformations"]
         assert scale["type"] == "scale"
-        assert scale["scale"] == (1.0, 1.0, 2.0 * 2**i, 2.0 * 2**i), i
+        assert scale["scale"] == [1.0, 1.0, 2.0 * 2**i, 2.0 * 2**i], i
         assert translation["type"] == "translation"
-        assert translation["translation"] == (
+        assert translation["translation"] == [
             0,
             0,
             2.0 * 2**i / 2 - 1.0,
             2.0 * 2**i / 2 - 1.0,
-        ), i
+        ], i
 
     # The metadata is also there when the group is opened again
     assert open_zarr(s, "pyr").attributes["ome"]["multiscales"][0]["name"] == "myname"
@@ -513,8 +513,8 @@ def test_write_multiscale_metadata():
     )
     ms = g.attributes["ome"]["multiscales"][0]
     d0, d1 = ms["datasets"]
-    assert d0["coordinateTransformations"][0]["scale"] == (1.0, 0.5, 2.0, 4.0)
-    assert d1["coordinateTransformations"][0]["scale"] == (1.0, 0.5, 4.0, 8.0)
+    assert d0["coordinateTransformations"][0]["scale"] == [1.0, 0.5, 2.0, 4.0]
+    assert d1["coordinateTransformations"][0]["scale"] == [1.0, 0.5, 4.0, 8.0]
 
 
 def test_write_multiscale_steps():
@@ -638,7 +638,7 @@ def test_write_multiscale_multiple_pyramids_metadata():
         ]
         for j, d in enumerate(ms["datasets"]):
             scale = d["coordinateTransformations"][0]["scale"]
-            assert scale == (1.0, 2.0 * 2**j, 2.0 * 2**j), (i, j)
+            assert scale == [1.0, 2.0 * 2**j, 2.0 * 2**j], (i, j)
 
     # The metadata is also there when the group is opened again
     reopened = open_zarr(s, "my/pyramids").attributes["ome"]["multiscales"]
@@ -803,11 +803,11 @@ def test_write_multiscale_multiple_pyramids_group_nodes():
         nlevels=2,
     )
 
-    # The subdirectories are plain groups, and the levels are reachable through them
+    # The subdirectories are ome-zarr groups, and the levels are reachable through them
     for i in range(2):
         g = open_zarr(s, f"pyramid{i}")
         assert isinstance(g, ZarrGroup), i
-        assert g.attributes == {}, i
+        assert "ome" in g.attributes, i
         assert open_zarr(s, f"pyramid{i}/level0").shape == shape, i
         assert open_zarr(s, f"pyramid{i}/level1").shape == (8, 10), i
 
