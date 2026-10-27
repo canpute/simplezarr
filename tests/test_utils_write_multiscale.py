@@ -803,13 +803,46 @@ def test_write_multiscale_multiple_pyramids_group_nodes():
         nlevels=2,
     )
 
-    # The subdirectories are ome-zarr groups, and the levels are reachable through them
+    # The subdirectories are themselves ome-zarr pyramids: each has the metadata
+    # for just that pyramid, with dataset paths relative to the subgroup
     for i in range(2):
         g = open_zarr(s, f"pyramid{i}")
         assert isinstance(g, ZarrGroup), i
-        assert "ome" in g.attributes, i
-        assert open_zarr(s, f"pyramid{i}/level0").shape == shape, i
-        assert open_zarr(s, f"pyramid{i}/level1").shape == (8, 10), i
+        assert g.attributes["ome"]["version"] == "0.5", i
+
+        ms_list = g.attributes["ome"]["multiscales"]
+        assert len(ms_list) == 1, i
+        ms = ms_list[0]
+        assert ms["name"] == f"pyr{i}", i
+        assert ms["type"] == "local_mean", i
+        assert [ax["name"] for ax in ms["axes"]] == ["y", "x"], i
+        assert [ax["type"] for ax in ms["axes"]] == ["space", "space"], i
+
+        # The dataset paths are relative to the subgroup (no prefix)
+        assert [d["path"] for d in ms["datasets"]] == ["level0", "level1"], i
+        for j, d in enumerate(ms["datasets"]):
+            # The paths resolve to the level arrays, relative to the subgroup
+            arr = open_zarr(s, f"pyramid{i}/{d['path']}")
+            assert arr.shape == (shape if j == 0 else (8, 10)), (i, j)
+            # And the coordinate transformations follow the level
+            scale, translation = d["coordinateTransformations"]
+            assert scale["scale"] == [1.0 * 2**j, 1.0 * 2**j], (i, j)
+            assert translation["translation"] == [
+                1.0 * 2**j / 2 - 0.5,
+                1.0 * 2**j / 2 - 0.5,
+            ], (i, j)
+
+    # The top level group has the metadata for all pyramids, with dataset
+    # paths relative to the top level group (i.e. with the prefix in it)
+    ms_list = open_zarr(s, "").attributes["ome"]["multiscales"]
+    assert [m["name"] for m in ms_list] == ["pyr0", "pyr1"]
+    for i, ms in enumerate(ms_list):
+        assert [d["path"] for d in ms["datasets"]] == [
+            f"pyramid{i}/level0",
+            f"pyramid{i}/level1",
+        ], i
+        # These paths resolve relative to the top level group
+        assert open_zarr(s, ms["datasets"][0]["path"]).shape == shape, i
 
     # A single pyramid has no pyramid subdirectories
     s = MemoryStore()
@@ -834,6 +867,11 @@ def test_write_multiscale_multiple_pyramids_group_nodes():
     g = open_zarr(s, "multires1")
     assert isinstance(g, ZarrGroup)
     assert open_zarr(s, "multires1/level1").shape == (8, 10)
+    # Also with a custom prefix, the subgroup metadata paths are relative
+    ms_sub = g.attributes["ome"]["multiscales"][0]
+    assert [d["path"] for d in ms_sub["datasets"]] == ["level0", "level1"]
+    for d in ms_sub["datasets"]:
+        assert open_zarr(s, f"multires1/{d['path']}").shape in [shape, (8, 10)]
     with pytest.raises(IOError):
         open_zarr(s, "pyramid0")
     ms = open_zarr(s, "").attributes["ome"]["multiscales"]
