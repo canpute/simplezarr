@@ -88,6 +88,15 @@ Parallel/lazy reads:
 * Use `pytest tests` to run the tests. Or `pytest tests --cov=simplezarr --cov-report=html` to get coverage reporting.
 
 
+## Releasing
+
+* Use `alver bump vx.y.z` to bump the version number and draft an entry in the `CHANGELOG.md`.
+* Edit the changelog (explicitly list API changes).
+* Contribute the changes via a PR.
+* If the branch name of that PR is "release", GH actions will tag and publish to GH and Pypi.
+  Otherwise, manually invoke the `release.yml` workflow, or push the appropriate tag to trigger the release.
+
+
 ## License
 
 This code is distributed under the MIT license.
