@@ -536,7 +536,8 @@ class SlowStore(WrapperStore):
     def __init__(
         self,
         store: ReadableStore | WritableStore | ListableStore,
-        base_delay: float = 1.0,
+        *,
+        base_delay: float = 0.1,
         delay_variation: float = 0.0,
         bits_per_second: float = 0.0,
     ):
@@ -546,11 +547,12 @@ class SlowStore(WrapperStore):
         self._bits_per_second = bits_per_second
 
     def _sleep(self, nbytes: int):
-        base_delay = self._base_delay
-        delay_variation = self._delay_variation
-        delay = random.uniform(
-            max(0, base_delay - delay_variation), base_delay + delay_variation
-        )
+        delay = base_delay = self._base_delay
+        delay_variation = max(0, self._delay_variation)
+        if delay_variation:
+            delay = random.uniform(
+                max(0, base_delay - delay_variation), base_delay + delay_variation
+            )
 
         if self._bits_per_second > 0:
             delay += (nbytes * 8) / self._bits_per_second

@@ -109,7 +109,12 @@ class WrapperStoreTestable(WrapperStore):
 
 class SlowStoreTestable(SlowStore):
     def __init__(self):
-        super().__init__(MemoryStore(STORE), 0.001, 10_000)
+        super().__init__(
+            MemoryStore(STORE),
+            base_delay=0.001,
+            bits_per_second=10_000,
+            delay_variation=0.001,
+        )
 
 
 # %%%%% Test all stores
