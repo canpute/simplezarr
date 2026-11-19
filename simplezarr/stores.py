@@ -42,9 +42,18 @@
 
 from __future__ import annotations
 
-import time
+import errno
+import posixpath
 import random
+import stat
+import threading
+import time
 from pathlib import Path
+
+try:
+    import paramiko
+except ImportError:
+    paramiko = None
 
 __all__ = [
     "BaseStore",
@@ -53,6 +62,7 @@ __all__ = [
     "ListableStore",
     "MemoryStore",
     "LocalStore",
+    "SftpStore",
     "WrapperStore",
     "SlowStore",
     "RetryStore",
@@ -475,6 +485,339 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
             dash = "/" if p.is_dir() else ""
             keys.add(key + dash)
         return sorted(keys)
+
+
+def _map_sftp_error(err: BaseException) -> BaseException:
+    """Map an error raised by the SFTP transport to the stores' error taxonomy.
+
+    SFTP errors (as raised by paramiko) are usually plain OSError instances,
+    often with an ``errno``. This function maps them to the builtin error that
+    matches their meaning: timeouts to TimeoutError and dropped connections to
+    ConnectionError (both retryable by the RetryStore), missing keys to
+    FileNotFoundError, etc. Errors that are already builtin errors, or that we
+    cannot interpret, are returned unchanged.
+    """
+    if isinstance(err, (TimeoutError, ConnectionError)):
+        return err
+    if isinstance(err, EOFError):
+        return ConnectionError("The SFTP connection was closed.")
+    if paramiko is not None and isinstance(err, paramiko.SSHException):
+        return ConnectionError(str(err) or err.__class__.__name__)
+    if isinstance(err, OSError):
+        if err.errno == errno.ENOENT:
+            return FileNotFoundError(str(err))
+        elif err.errno in (errno.EACCES, errno.EPERM):
+            return PermissionError(str(err))
+        elif err.errno == errno.ENOTDIR:
+            return NotADirectoryError(str(err))
+        elif err.errno == errno.EISDIR:
+            return IsADirectoryError(str(err))
+        elif err.errno == errno.ETIMEDOUT:
+            return TimeoutError(str(err))
+        elif err.errno in (
+            errno.EPIPE,
+            errno.ECONNRESET,
+            errno.ECONNABORTED,
+            errno.ECONNREFUSED,
+            errno.EHOSTUNREACH,
+            errno.ENETUNREACH,
+            errno.ENETDOWN,
+        ):
+            return ConnectionError(str(err))
+    return err
+
+
+class SftpStore(ReadableStore, WritableStore, ListableStore):
+    """Implementation of a readable, writable and listable store, using SFTP.
+
+    The keys are files on the remote server, relative to the given root path;
+    the directory structure mirrors the keys. Missing directories are created
+    when a key is set (and cached, so that setting many keys in the same
+    directory is efficient).
+
+    The connection is set up when the store is created, and owned by the store.
+    When the transport fails (i.e. a TimeoutError or ConnectionError is raised),
+    the store drops the connection and reconnects on the next operation. Note
+    that this store does not retry by itself; wrap it in a RetryStore to retry
+    such transient errors within a total timeout.
+
+    This store requires the ``paramiko`` package, which can be installed with
+    ``pip install simplezarr[sftp]``. Because SFTP clients are not thread-safe,
+    all operations are serialized with a lock.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        path: str = "/",
+        *,
+        port: int = 22,
+        username: str | None = None,
+        password: str | None = None,
+        key_filename: str | None = None,
+        timeout: float = 5.0,
+        allow_new_host: bool = True,
+        sftp_client: object = None,
+    ):
+        """Create a store on the given host, rooted at the given path.
+
+        Parameters:
+            host (str): the hostname or IP address of the server.
+            path (str): the path on the server that is the root of this store.
+            port (int): the port to connect to (usually 22).
+            username (str, optional): the username to authenticate with.
+            password (str, optional): the password to authenticate with.
+            key_filename (str, optional): the path to a private key file to
+                authenticate with.
+            timeout (float): the timeout in seconds for connecting, and for
+                each individual operation on the connection.
+            allow_new_host (bool): if True (default), automatically trust and
+                remember host keys that are not yet in the system's known
+                hosts. No protection against man-in-the-middle attacks is
+                performed in that case.
+            sftp_client (object, optional): an already connected SFTP client
+                to use instead of creating a connection (e.g. for testing).
+                The given client is used as-is; the store will not close or
+                re-connect it.
+        """
+        self._host = host
+        self._port = int(port)
+        self._username = username
+        self._password = password
+        self._key_filename = key_filename
+        self._timeout = float(timeout)
+        self._allow_new_host = bool(allow_new_host)
+
+        path = "/" + str(path or "").strip("/")
+        self._path = "" if path == "/" else path
+
+        self._lock = threading.RLock()
+        self._dirs = set()  # the remote paths that we know exist as directories
+        self._client = None
+        self._sftp = sftp_client
+        self._owns_client = sftp_client is None
+        if self._owns_client:
+            self._connect()
+
+    def __repr__(self):
+        username = f"{self._username}@" if self._username else ""
+        host = f"{self._host}:{self._port}" if self._host else ""
+        return f"<SftpStore '{username}{host}{self._path}/'>"
+
+    @property
+    def path(self) -> str:
+        """The path on the server that represents the root of this store."""
+        return self._path or "/"
+
+    def close(self):
+        """Close the connection, if the store owns it."""
+        with self._lock:
+            self._drop()
+
+    def _connect(self):
+        if paramiko is None:
+            raise ImportError(
+                f"The {self.__class__.__name__} requires the 'paramiko' package, "
+                "install it with: pip install simplezarr[sftp]"
+            )
+        try:
+            client = paramiko.SSHClient()
+            client.load_system_host_keys()
+            if self._allow_new_host:
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(
+                self._host,
+                port=self._port,
+                username=self._username,
+                password=self._password,
+                key_filename=self._key_filename,
+                timeout=self._timeout,
+            )
+            sftp = client.open_sftp()
+            channel = sftp.get_channel()
+            if channel is not None:
+                channel.settimeout(self._timeout)
+        except paramiko.AuthenticationException as err:
+            raise PermissionError(
+                f"Could not authenticate to {self._host!r}: {err}"
+            ) from err
+        except paramiko.SSHException as err:
+            raise ConnectionError(
+                f"Could not connect to {self._host!r}: {err}"
+            ) from err
+        self._client, self._sftp = client, sftp
+
+    def _drop(self):
+        # Close the connection, if we own it. Called when the transport fails,
+        # so that the next operation reconnects.
+        if not self._owns_client:
+            return
+        client, sftp = self._client, self._sftp
+        self._client = self._sftp = None
+        for ob in (sftp, client):
+            if ob is not None:
+                try:
+                    ob.close()
+                except Exception:
+                    pass
+
+    def _ensure_sftp(self):
+        sftp = self._sftp
+        if not self._owns_client:
+            if sftp is None:
+                raise RuntimeError("This store has no SFTP client.")
+            return sftp
+        transport = None
+        if self._client is not None:
+            transport = self._client.get_transport()
+        if sftp is None or transport is None or not transport.is_active():
+            self._drop()
+            self._connect()
+            sftp = self._sftp
+        return sftp
+
+    def _with_sftp(self, op):
+        # Serialize all access, since SFTP clients are not thread-safe.
+        # Transient errors drop the connection, so that the next attempt
+        # (e.g. by the RetryStore) reconnects.
+        with self._lock:
+            sftp = self._ensure_sftp()
+            try:
+                return op(sftp)
+            except BaseException as err:
+                mapped = _map_sftp_error(err)
+                if isinstance(mapped, (TimeoutError, ConnectionError)):
+                    self._drop()
+                if mapped is not err:
+                    raise mapped from err
+                raise
+
+    def _key_to_path(self, key: str) -> str:
+        parts = [p for p in key.split("/") if p]
+        root = self._path
+        return "/".join([root, *parts]) if root else "/" + "/".join(parts)
+
+    def _path_to_key(self, path: str) -> str:
+        return path[len(self._path) + 1 :]
+
+    def _mkdirs(self, sftp, dir_path: str) -> None:
+        # Create all missing directories, like Path.mkdir(parents=True).
+        p = ""
+        for part in [x for x in dir_path.split("/") if x]:
+            p += "/" + part
+            if p in self._dirs:
+                continue
+            try:
+                attr = sftp.stat(p)
+            except OSError as err:
+                if err.errno != errno.ENOENT:
+                    raise
+                sftp.mkdir(p)
+                self._dirs.add(p)
+                continue
+            if attr.st_mode and stat.S_ISDIR(attr.st_mode):
+                self._dirs.add(p)
+            # Else the path exists as a file: the write that follows will
+            # fail with a NotADirectoryError, which is what we want.
+
+    def _get(self, key: str) -> bytes:
+        p = self._key_to_path(key)
+
+        def op(sftp):
+            with sftp.open(p, "rb") as f:
+                return f.read()
+
+        return self._with_sftp(op)
+
+    def _get_partial_values(
+        self, key_ranges: List[tuple[str, int, int | None]]
+    ) -> list[bytes]:
+        def op(sftp):
+            result = []
+            for key, start, length in key_ranges:
+                with sftp.open(self._key_to_path(key), "rb") as f:
+                    f.seek(start)
+                    result.append(f.read(length))
+            return result
+
+        return self._with_sftp(op)
+
+    def _set(self, key: str, value: bytes):
+        if isinstance(value, memoryview) and not value.c_contiguous:
+            value = value.tobytes()
+        p = self._key_to_path(key)
+
+        def op(sftp):
+            self._mkdirs(sftp, posixpath.dirname(p))
+            with sftp.open(p, "wb") as f:
+                f.write(value)
+
+        return self._with_sftp(op)
+
+    def _set_partial_values(self, key_start_values: List[tuple[str, int, bytes]]):
+        def op(sftp):
+            for key, start, value in key_start_values:
+                if isinstance(value, memoryview) and not value.c_contiguous:
+                    value = value.tobytes()
+                with sftp.open(self._key_to_path(key), "r+b") as f:
+                    f.seek(start)
+                    f.write(value)
+
+        return self._with_sftp(op)
+
+    def _erase(self, key: str):
+        p = self._key_to_path(key)
+        return self._with_sftp(lambda sftp: sftp.remove(p))
+
+    # def _erase_values(self, keys: List[str]):  ->  use default implementation
+
+    def _walk(self, sftp, dir_path: str) -> list[str]:
+        # Recursive listing of all files under the given directory, as keys.
+        try:
+            entries = sftp.listdir_attr(dir_path)
+        except OSError as err:
+            if err.errno in (errno.ENOENT, errno.ENOTDIR):
+                return []
+            raise
+        keys = []
+        for entry in entries:
+            if entry.filename in (".", ".."):
+                continue
+            path = dir_path.rstrip("/") + "/" + entry.filename
+            if entry.st_mode and stat.S_ISDIR(entry.st_mode):
+                keys.extend(self._walk(sftp, path))
+            else:
+                keys.append(self._path_to_key(path))
+        return keys
+
+    def _list(self) -> list[str]:
+        return self._with_sftp(lambda sftp: sorted(self._walk(sftp, self._path or "/")))
+
+    def _list_prefix(self, prefix: str) -> list[str]:
+        prefix = "" if prefix == "/" else prefix  # Special case
+        p = self._key_to_path(prefix)
+        return self._with_sftp(lambda sftp: sorted(self._walk(sftp, p)))
+
+    def _list_dir(self, prefix: str) -> list[str]:
+        prefix = "" if prefix == "/" else prefix  # Special case
+        p = self._key_to_path(prefix)
+
+        def op(sftp):
+            try:
+                entries = sftp.listdir_attr(p)
+            except OSError as err:
+                if err.errno in (errno.ENOENT, errno.ENOTDIR):
+                    return []
+                raise
+            keys = set()
+            for entry in entries:
+                if entry.filename in (".", ".."):
+                    continue
+                is_dir = bool(entry.st_mode and stat.S_ISDIR(entry.st_mode))
+                keys.add(prefix + entry.filename + ("/" if is_dir else ""))
+            return sorted(keys)
+
+        return self._with_sftp(op)
 
 
 class WrapperStore(ReadableStore, WritableStore, ListableStore):
