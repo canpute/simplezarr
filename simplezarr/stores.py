@@ -637,7 +637,7 @@ def _retry_transient(
             return op()
         except retry_on as err:
             remaining = deadline - time.perf_counter()
-            if remaining <= 0 or (max_attempts is not None and attempt >= max_attempts):
+            if remaining <= 0 or (attempt >= max_attempts):
                 raise TimeoutError(
                     f"{op_name} failed after {attempt} tries; last error: {err!r}"
                 ) from err
@@ -648,19 +648,15 @@ def _retry_transient(
 class RetryStore(WrapperStore):
     """A store wrapper that retries transient errors until a total timeout.
 
-    Errors that match ``retry_on`` (by default TimeoutError and ConnectionError,
-    see the exception taxonomy at the top of this module) are retried with an
-    increasing delay, until the total timeout has passed, after which a
-    TimeoutError is raised, with the last error as its cause. Any other error
+    Errors that match ``retry_on`` (by default TimeoutError and ConnectionError) are
+    retried with an increasing delay, until the total timeout has passed, after which
+    a TimeoutError is raised, with the last error as its cause. Any other error
     (e.g. FileNotFoundError or PermissionError) is raised immediately.
 
     This means that downstream code can catch IOError and treat it as a genuine
     error: the retrying is the responsibility of this store. Note that the
     wrapped store is responsible for per-attempt timeouts on its transport;
     this wrapper cannot interrupt an attempt that hangs.
-
-    If no timeout is given, the ``timeout`` attribute of the wrapped store is
-    used (see ``BaseStore.timeout``).
     """
 
     def __init__(
@@ -669,16 +665,16 @@ class RetryStore(WrapperStore):
         *,
         timeout: float = 10.0,
         retry_on: tuple = (TimeoutError, ConnectionError),
-        max_attempts: int | None = None,
+        max_attempts: int = 100,
         base_sleep: float = 0.05,
         max_sleep: float = 0.5,
     ):
         super().__init__(store)
-        self._timeout = store.timeout if timeout is None else float(timeout)
+        self._timeout = float(timeout)
         self._retry_on = tuple(retry_on)
-        self._max_attempts = max_attempts
-        self._base_sleep = base_sleep
-        self._max_sleep = max_sleep
+        self._max_attempts = int(max_attempts)
+        self._base_sleep = float(base_sleep)
+        self._max_sleep = float(max_sleep)
 
     def __repr__(self):
         return f"<{self.__class__.__name__} timeout={self._timeout} of {self._sub!r}>"

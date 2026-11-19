@@ -474,20 +474,6 @@ def test_retry_store_max_attempts():
     assert flaky.calls["get"] == 3
 
 
-def test_retry_store_timeout_from_store():
-    # Without an explicit timeout, the timeout of the wrapped store is used
-    flaky = FlakyStore(fail_times=1, fields={"foo": b"hi foo"})
-    store = RetryStore(flaky, base_sleep=0.001, max_sleep=0.002)
-    assert store._timeout == BaseStore.timeout
-
-    flaky = FlakyStore(fail_times=1_000_000, fields={"foo": b"hi foo"})
-    flaky.timeout = 0.1
-    store = RetryStore(flaky, base_sleep=0.001, max_sleep=0.002)
-
-    with pytest.raises(TimeoutError):
-        store.get("foo")
-
-
 def test_meta():
     classes = set()
     for name, ob in globals().items():
