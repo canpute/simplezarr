@@ -1,5 +1,5 @@
 # The store interface and implementations. This code follows the abstract store
-# interface as defines in the Zarr spec:
+# interface as defined in the Zarr spec:
 #
 #     https://zarr-specs.readthedocs.io/en/latest/v3/core/index.html
 #
@@ -22,6 +22,23 @@
 #
 # Further, the spec seems to assume that there is no dash prefix; so "a/b", rather
 # than "/a/b". We follow this in the stores.
+#
+# In this implementation we intend to clearly define the exceptions that the store's
+# method may raise, as that is a part of the API too. To do so we discern:
+#
+# - TypeError and ValueError for programmer errors for the improper usage of the API.
+# - IOError for anything else, preferably a builtin subclass, see below.
+# - FileNotFoundError: key not present in the store. Can be caught and handled!
+# - NotADirectoryError: prefix is not present in the store.
+# - PermissionError: the data is present but not allowed.
+# - ConnectionError: the request could not connect or was aborted.
+# - TimeoutError: the request timed out.
+#
+# Of these, ConnectionError and TimeoutError are considered transient errors: the
+# RetryStore wrapper retries them (with an increasing delay) until a total timeout
+# is reached, after which it raises a TimeoutError. Downstream code can thus treat
+# any error that a store raises as a genuine (non-retryable) error.
+
 
 from __future__ import annotations
 
@@ -38,6 +55,7 @@ __all__ = [
     "LocalStore",
     "WrapperStore",
     "SlowStore",
+    "RetryStore",
 ]
 
 List = list  # for typing
@@ -328,7 +346,7 @@ class MemoryStore(ReadableStore, WritableStore, ListableStore):
         try:
             return self._dict[key]
         except KeyError:
-            raise IOError(f"get(): key {key!r} does not exist.") from None
+            raise FileNotFoundError(f"get(): key {key!r} does not exist.") from None
 
     def _set(self, key: str, value: bytes):
         if key in self._dict:
@@ -339,11 +357,15 @@ class MemoryStore(ReadableStore, WritableStore, ListableStore):
             for d in key.split("/")[:-1]:
                 dir += f"{d}/"
                 if dir[:-1] in self._dict:
-                    raise IOError(f"Cannot set {key!r} because {dir[:-1]!r} exists.")
+                    raise NotADirectoryError(
+                        f"Cannot set {key!r} because {dir[:-1]!r} exists."
+                    )
                 self._dirs.add(dir)
             # Make sure no keys exist that consider this key a dir
             if (key + "/") in self._dirs:
-                raise IOError(f"Cannot set {key!r} because it is a directory.")
+                raise IsADirectoryError(
+                    f"Cannot set {key!r} because it is a directory."
+                )
         if not isinstance(value, bytes):  # only store as bytes
             value = value.tobytes()
         self._dict[key] = value
@@ -352,7 +374,7 @@ class MemoryStore(ReadableStore, WritableStore, ListableStore):
         try:
             self._dict.pop(key)
         except KeyError:
-            raise IOError(f"erase(): key {key!r} does not exist.") from None
+            raise FileNotFoundError(f"erase(): key {key!r} does not exist.") from None
         # Note: it would be good to remove from self._dirs for dirs that are now empty. For now we don't bother.
 
     def _list(self) -> list[str]:
@@ -381,7 +403,7 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
         if p.is_file():
             return p.read_bytes()
         else:
-            raise IOError(f"get(): key {key!r} does not exist.")
+            raise FileNotFoundError(f"get(): key {key!r} does not exist.")
 
     def _get_partial_values(
         self, key_ranges: List[tuple[str, int, int | None]]
@@ -390,7 +412,7 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
         for key, start, length in key_ranges:
             p = self._path.joinpath(*key.split("/"))
             if not p.is_file():
-                raise IOError(
+                raise FileNotFoundError(
                     f"Key {key!r} does not exist (for getting partial value)."
                 )
             with p.open("rb") as f:
@@ -409,7 +431,7 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
         for key, start, value in key_start_values:
             p = self._path.joinpath(*key.split("/"))
             if not p.is_file():
-                raise IOError(
+                raise FileNotFoundError(
                     f"Key {key!r} does not exist (for setting partial value)."
                 )
             if isinstance(value, memoryview) and not value.c_contiguous:
@@ -423,7 +445,7 @@ class LocalStore(ReadableStore, WritableStore, ListableStore):
         if p.is_file():
             p.unlink()
         else:
-            raise IOError(f"erase(): key {key!r} does not exist.")
+            raise FileNotFoundError(f"erase(): key {key!r} does not exist.")
 
     # def _erase_values(self, keys: List[str]):  ->  use default implementation
     # def _erase_prefix(self, prefix: str):  ->  use default implementation, could use shutil.rmtree if we want to optimize this
@@ -540,15 +562,20 @@ class SlowStore(WrapperStore):
         base_delay: float = 0.1,
         delay_variation: float = 0.0,
         bits_per_second: float = 0.0,
+        chance_to_timeout: float = 0.0,
+        chance_to_fail_on_chunks: float = 0.0,
     ):
         super().__init__(store)
-        self._base_delay = base_delay
-        self._delay_variation = delay_variation
-        self._bits_per_second = bits_per_second
+        self._base_delay = max(0.0, base_delay)
+        self._delay_variation = max(0.0, delay_variation)
+        self._bits_per_second = max(0.0, bits_per_second)
+        self._chance_to_timeout = max(0.0, min(1.0, chance_to_timeout))
+        self._chance_to_fail_on_chunks = max(0.0, min(1.0, chance_to_fail_on_chunks))
 
     def _sleep(self, nbytes: int):
         delay = base_delay = self._base_delay
-        delay_variation = max(0, self._delay_variation)
+        delay_variation = self._delay_variation
+
         if delay_variation:
             delay = random.uniform(
                 max(0, base_delay - delay_variation), base_delay + delay_variation
@@ -560,10 +587,20 @@ class SlowStore(WrapperStore):
         if delay > 0:
             time.sleep(delay)
 
+        if self._chance_to_timeout:
+            if random.uniform(0, 1) < self._chance_to_timeout:
+                raise TimeoutError("The Zarr store operation timed out.")
+
     def _hook(self, method, args, result):
         # read delay
         if method == "get":
             self._sleep(len(result))
+
+            if self._chance_to_fail_on_chunks and not args[0].endswith(".json"):
+                if random.uniform(0, 1) < self._chance_to_fail_on_chunks:
+                    raise IOError(
+                        f"The Zarr store could not load {args[0]!r} for some reason."
+                    )
 
         elif method == "get_partial_values":
             self._sleep(sum(len(x) for x in result))
@@ -580,6 +617,123 @@ class SlowStore(WrapperStore):
         # base delay
         else:
             self._sleep(0)
+
+
+def _retry_transient(
+    op, op_name, timeout, retry_on, max_attempts, base_sleep, max_sleep
+):
+    """Run the given zero-argument callable and retry transient errors until the total timeout.
+
+    The delay between attempts increases exponentially (with jitter), and never
+    sleeps beyond the remaining time. When the total timeout has passed (or the
+    max number of attempts is reached), a TimeoutError is raised, with the last
+    retryable error as its cause. Any other error propagates immediately.
+    """
+    deadline = time.perf_counter() + timeout
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return op()
+        except retry_on as err:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0 or (max_attempts is not None and attempt >= max_attempts):
+                raise TimeoutError(
+                    f"{op_name} failed after {attempt} tries; last error: {err!r}"
+                ) from err
+            delay = min(base_sleep * 2**attempt, max_sleep, remaining)
+            time.sleep(delay * random.uniform(0.5, 1.0))
+
+
+class RetryStore(WrapperStore):
+    """A store wrapper that retries transient errors until a total timeout.
+
+    Errors that match ``retry_on`` (by default TimeoutError and ConnectionError,
+    see the exception taxonomy at the top of this module) are retried with an
+    increasing delay, until the total timeout has passed, after which a
+    TimeoutError is raised, with the last error as its cause. Any other error
+    (e.g. FileNotFoundError or PermissionError) is raised immediately.
+
+    This means that downstream code can catch IOError and treat it as a genuine
+    error: the retrying is the responsibility of this store. Note that the
+    wrapped store is responsible for per-attempt timeouts on its transport;
+    this wrapper cannot interrupt an attempt that hangs.
+
+    If no timeout is given, the ``timeout`` attribute of the wrapped store is
+    used (see ``BaseStore.timeout``).
+    """
+
+    def __init__(
+        self,
+        store: ReadableStore | WritableStore | ListableStore,
+        *,
+        timeout: float = 10.0,
+        retry_on: tuple = (TimeoutError, ConnectionError),
+        max_attempts: int | None = None,
+        base_sleep: float = 0.05,
+        max_sleep: float = 0.5,
+    ):
+        super().__init__(store)
+        self._timeout = store.timeout if timeout is None else float(timeout)
+        self._retry_on = tuple(retry_on)
+        self._max_attempts = max_attempts
+        self._base_sleep = base_sleep
+        self._max_sleep = max_sleep
+
+    def __repr__(self):
+        return f"<{self.__class__.__name__} timeout={self._timeout} of {self._sub!r}>"
+
+    def _retry(self, op_name, op):
+        return _retry_transient(
+            op,
+            op_name,
+            timeout=self._timeout,
+            retry_on=self._retry_on,
+            max_attempts=self._max_attempts,
+            base_sleep=self._base_sleep,
+            max_sleep=self._max_sleep,
+        )
+
+    # Below, each hook wraps the sub-store call in the retry logic. The
+    # public get()/set()/list()/... methods are inherited, so key validation
+    # stays in one place and cannot recurse.
+
+    def _get(self, key: str) -> bytes:
+        return self._retry("get", lambda: self._sub.get(key))
+
+    def _get_partial_values(
+        self, key_ranges: List[tuple[str, int, int | None]]
+    ) -> list[bytes]:
+        return self._retry(
+            "get_partial_values", lambda: self._sub._get_partial_values(key_ranges)
+        )
+
+    def _set(self, key: str, value: bytes):
+        return self._retry("set", lambda: self._sub._set(key, value))
+
+    def _set_partial_values(self, key_start_values: List[tuple[str, int, bytes]]):
+        return self._retry(
+            "set_partial_values",
+            lambda: self._sub._set_partial_values(key_start_values),
+        )
+
+    def _erase(self, key: str):
+        return self._retry("erase", lambda: self._sub._erase(key))
+
+    def _erase_values(self, keys: List[str]):
+        return self._retry("erase_values", lambda: self._sub._erase_values(keys))
+
+    def _erase_prefix(self, prefix: str):
+        return self._retry("erase_prefix", lambda: self._sub._erase_prefix(prefix))
+
+    def _list(self) -> list[str]:
+        return self._retry("list", self._sub._list)
+
+    def _list_prefix(self, prefix: str) -> List[str]:
+        return self._retry("list_prefix", lambda: self._sub._list_prefix(prefix))
+
+    def _list_dir(self, prefix: str) -> List[str]:
+        return self._retry("list_dir", lambda: self._sub._list_dir(prefix))
 
 
 # More store ideas:

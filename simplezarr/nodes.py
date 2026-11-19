@@ -191,15 +191,17 @@ class ZarrGroup(ZarrNode):
         # todo: use list_dir only lazily
 
         n = len(self._path)
+
         items = self._store.list_dir(self._path + "/")
+
         dir_names = [item[n:].strip("/") for item in items if item.endswith("/")]
 
         self._children = {}
         for name in dir_names:
             try:
                 node = ZarrNode._from_path(self._store, f"{self._path}/{name}")
-            except IOError:
-                continue
+            except FileNotFoundError:
+                continue  # zarr.json not present, so not a Zarr node
             else:
                 self._children[name] = node
 
@@ -628,7 +630,7 @@ class ZarrArray(ZarrNode):
             path = self._path + "/" + path
         try:
             encoded_bytes = self._store.get(path)
-        except IOError:
+        except FileNotFoundError:
             encoded_bytes = None
 
         # Return decoded
@@ -723,7 +725,7 @@ class ZarrArray(ZarrNode):
         if check_empty and np.all(data == self._fill_value):
             try:
                 self._store.erase(path)
-            except IOError:
+            except FileNotFoundError:
                 pass
         else:
             codecs, types, _codecs_reversed, _types_reversed = (

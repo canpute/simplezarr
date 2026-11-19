@@ -323,7 +323,7 @@ def test_zarr_chunk_key_encoding():
 
     # The old (non-compliant) key format must not be used nor found
 
-    with pytest.raises(IOError):
+    with pytest.raises(FileNotFoundError):
         s.get("sub/array/c/0.1")
 
 

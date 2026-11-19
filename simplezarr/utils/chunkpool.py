@@ -377,7 +377,10 @@ class ChunkLocation:
         """Synchronously wait for the chunk's data to load."""
         if self._future is None:
             return  # already destroyed
-        self._future.result()
+        try:
+            self._future.result()
+        except IOError:
+            pass  # will raise when getting .data
         self._process_load_handlers()
 
     def _register(
