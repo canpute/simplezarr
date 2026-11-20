@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import errno
 import posixpath
+import queue
 import random
 import stat
 import threading
@@ -541,9 +542,14 @@ class SftpStore(ReadableStore, WritableStore, ListableStore):
     that this store does not retry by itself; wrap it in a RetryStore to retry
     such transient errors within a total timeout.
 
+    Multiple SFTP channels can be opened over the same SSH connection (like
+    Filezilla does simultaneous transfers): when ``connections`` is larger than
+    one, operations run in parallel on that many channels, which can speed up
+    the transfer of many small files considerably. Note that servers typically
+    limit the number of sessions per SSH connection (e.g. ~10 for OpenSSH).
+
     This store requires the ``paramiko`` package, which can be installed with
-    ``pip install simplezarr[sftp]``. Because SFTP clients are not thread-safe,
-    all operations are serialized with a lock.
+    ``pip install simplezarr[sftp]``.
     """
 
     def __init__(
@@ -556,6 +562,7 @@ class SftpStore(ReadableStore, WritableStore, ListableStore):
         password: str | None = None,
         key_filename: str | None = None,
         timeout: float = 5.0,
+        connections: int = 1,
         allow_new_host: bool = True,
         sftp_client: object = None,
     ):
@@ -569,8 +576,12 @@ class SftpStore(ReadableStore, WritableStore, ListableStore):
             password (str, optional): the password to authenticate with.
             key_filename (str, optional): the path to a private key file to
                 authenticate with.
-            timeout (float): the timeout in seconds for connecting, and for
-                each individual operation on the connection.
+            timeout (float): the timeout in seconds for connecting, for each
+                individual operation on a connection, and for waiting for a
+                free connection from the pool.
+            connections (int): the number of parallel SFTP channels to use
+                (all over the same SSH connection). The default of 1 means
+                that all operations are sequential.
             allow_new_host (bool): if True (default), automatically trust and
                 remember host keys that are not yet in the system's known
                 hosts. No protection against man-in-the-middle attacks is
@@ -578,7 +589,7 @@ class SftpStore(ReadableStore, WritableStore, ListableStore):
             sftp_client (object, optional): an already connected SFTP client
                 to use instead of creating a connection (e.g. for testing).
                 The given client is used as-is; the store will not close or
-                re-connect it.
+                re-connect it, and it is used for all operations.
         """
         self._host = host
         self._port = int(port)
@@ -587,14 +598,22 @@ class SftpStore(ReadableStore, WritableStore, ListableStore):
         self._key_filename = key_filename
         self._timeout = float(timeout)
         self._allow_new_host = bool(allow_new_host)
+        self._n_connections = max(1, int(connections))
+        if sftp_client is not None and self._n_connections > 1:
+            raise ValueError(
+                "The connections argument can only be used when the store "
+                "owns the connection (i.e. no sftp_client is given)."
+            )
 
         path = "/" + str(path or "").strip("/")
         self._path = "" if path == "/" else path
 
         self._lock = threading.RLock()
         self._dirs = set()  # the remote paths that we know exist as directories
-        self._client = None
-        self._sftp = sftp_client
+        self._client = None  # the SSH client (only when we own the connection)
+        self._pool = None  # the idle SFTP clients (queue, when we own it)
+        self._active = set()  # the alive SFTP clients (when we own it)
+        self._sftp = sftp_client  # the single SFTP client (only when injected)
         self._owns_client = sftp_client is None
         if self._owns_client:
             self._connect()
@@ -610,18 +629,23 @@ class SftpStore(ReadableStore, WritableStore, ListableStore):
         return self._path or "/"
 
     def close(self):
-        """Close the connection, if the store owns it."""
+        """Close the connection(s), if the store owns them."""
         with self._lock:
             self._drop()
 
     def _connect(self):
+        self._client = self._create_ssh_client()
+        self._pool = queue.Queue()
+        self._active = set()
+
+    def _create_ssh_client(self):
         if paramiko is None:
             raise ImportError(
                 f"The {self.__class__.__name__} requires the 'paramiko' package, "
                 "install it with: pip install simplezarr[sftp]"
             )
+        client = paramiko.SSHClient()
         try:
-            client = paramiko.SSHClient()
             client.load_system_host_keys()
             if self._allow_new_host:
                 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -633,10 +657,6 @@ class SftpStore(ReadableStore, WritableStore, ListableStore):
                 key_filename=self._key_filename,
                 timeout=self._timeout,
             )
-            sftp = client.open_sftp()
-            channel = sftp.get_channel()
-            if channel is not None:
-                channel.settimeout(self._timeout)
         except paramiko.AuthenticationException as err:
             raise PermissionError(
                 f"Could not authenticate to {self._host!r}: {err}"
@@ -645,52 +665,115 @@ class SftpStore(ReadableStore, WritableStore, ListableStore):
             raise ConnectionError(
                 f"Could not connect to {self._host!r}: {err}"
             ) from err
-        self._client, self._sftp = client, sftp
+        return client
 
-    def _drop(self):
-        # Close the connection, if we own it. Called when the transport fails,
-        # so that the next operation reconnects.
-        if not self._owns_client:
-            return
-        client, sftp = self._client, self._sftp
-        self._client = self._sftp = None
-        for ob in (sftp, client):
-            if ob is not None:
-                try:
-                    ob.close()
-                except Exception:
-                    pass
-
-    def _ensure_sftp(self):
-        sftp = self._sftp
-        if not self._owns_client:
-            if sftp is None:
-                raise RuntimeError("This store has no SFTP client.")
-            return sftp
-        transport = None
-        if self._client is not None:
-            transport = self._client.get_transport()
-        if sftp is None or transport is None or not transport.is_active():
-            self._drop()
-            self._connect()
-            sftp = self._sftp
+    def _open_sftp(self):
+        # The caller must hold the lock, and the (owned) SSH connection must
+        # be alive. Channels are cheap: many can exist over the same SSH
+        # connection; the server limits their number (e.g. ~10 for OpenSSH).
+        sftp = self._client.open_sftp()
+        get_channel = getattr(sftp, "get_channel", None)
+        if get_channel is not None:
+            channel = get_channel()
+            if channel is not None:
+                channel.settimeout(self._timeout)
         return sftp
 
-    def _with_sftp(self, op):
-        # Serialize all access, since SFTP clients are not thread-safe.
-        # Transient errors drop the connection, so that the next attempt
-        # (e.g. by the RetryStore) reconnects.
+    def _drop(self):
+        # Close the connection(s), if we own them. Called when the transport
+        # fails or on close(), so that the next operation re-connects.
+        if not self._owns_client:
+            return
         with self._lock:
-            sftp = self._ensure_sftp()
+            client = self._client
+            pool = self._pool if self._pool is not None else queue.Queue()
+            active = self._active if self._active else set()
+            self._client = None
+            self._pool = queue.Queue()
+            self._active = set()
+        for sftp in list(pool.queue) + list(active):
             try:
-                return op(sftp)
-            except BaseException as err:
-                mapped = _map_sftp_error(err)
-                if isinstance(mapped, (TimeoutError, ConnectionError)):
+                sftp.close()
+            except Exception:
+                pass
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def _acquire(self):
+        # Get an available SFTP client. Creates new channels up to
+        # ``connections``, and otherwise waits (up to the timeout) for a
+        # channel to become available. The transport is re-established when
+        # it died, so that the next attempt (e.g. by the RetryStore)
+        # reconnects.
+        deadline = time.perf_counter() + self._timeout
+        while True:
+            with self._lock:
+                transport = self._client.get_transport() if self._client else None
+                if transport is None or not transport.is_active():
                     self._drop()
-                if mapped is not err:
-                    raise mapped from err
-                raise
+                    self._connect()
+                try:
+                    return self._pool.get_nowait()
+                except queue.Empty:
+                    if len(self._active) < self._n_connections:
+                        sftp = self._open_sftp()
+                        self._active.add(sftp)
+                        return sftp
+            # All channels are in use: wait for one to be released
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Timed out waiting for a free SFTP connection "
+                    f"({self._n_connections} available)."
+                )
+            try:
+                return self._pool.get(timeout=remaining)
+            except queue.Empty:
+                pass  # Loop: re-check the transport, and try again
+
+    def _release(self, sftp, broken: bool):
+        # Return an SFTP client to the pool, or close it when it is broken.
+        if not self._owns_client:
+            return
+        if broken:
+            self._active.discard(sftp)
+            try:
+                sftp.close()
+            except Exception:
+                pass
+        else:
+            self._pool.put(sftp)
+
+    @staticmethod
+    def _run_op(sftp, op):
+        try:
+            return op(sftp)
+        except BaseException as err:
+            mapped = _map_sftp_error(err)
+            if mapped is not err:
+                raise mapped from err
+            raise
+
+    def _with_sftp(self, op):
+        if not self._owns_client:
+            # The injected client is used for all operations; serialize
+            # access with a lock, since SFTP clients are not thread-safe.
+            with self._lock:
+                return self._run_op(self._sftp, op)
+        # Transient errors (mapped to TimeoutError/ConnectionError) mean the
+        # channel is suspect: it is closed and replaced on next use.
+        sftp = self._acquire()
+        broken = False
+        try:
+            return self._run_op(sftp, op)
+        except BaseException:
+            broken = True
+            raise
+        finally:
+            self._release(sftp, broken)
 
     def _key_to_path(self, key: str) -> str:
         parts = [p for p in key.split("/") if p]
@@ -725,6 +808,10 @@ class SftpStore(ReadableStore, WritableStore, ListableStore):
 
         def op(sftp):
             with sftp.open(p, "rb") as f:
+                if hasattr(f, "prefetch"):
+                    # Pipeline the reads, instead of doing a round-trip for
+                    # each 32 kB packet, which is slow on high-latency links.
+                    f.prefetch()
                 return f.read()
 
         return self._with_sftp(op)

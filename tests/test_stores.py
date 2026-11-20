@@ -2,6 +2,7 @@ from pathlib import Path
 import errno
 import shutil
 import stat
+import threading
 import time
 
 from simplezarr.stores import (
@@ -185,9 +186,13 @@ class FakeSftpClient:
 
     def __init__(self, fields=None):
         self._files = {}  # absolute posix path -> bytearray
+        self.closed = False
         if fields:
             for key, value in fields.items():
                 self._files["/" + key] = bytearray(value)
+
+    def close(self):
+        self.closed = True
 
     def _is_dir(self, path):
         # Directories are registered implicitly, by the files that are in them
@@ -619,10 +624,141 @@ def test_sftp_store_retry_integration():
 
     # And with all attempts failing, the RetryStore raises a TimeoutError
     flaky = FlakySftpClient(fail_times=10_000)
-    store = RetryStore(SftpStore("", "/", sftp_client=flaky), timeout=0.05, base_sleep=0.001, max_sleep=0.002)
+    store = RetryStore(
+        SftpStore("", "/", sftp_client=flaky),
+        timeout=0.05,
+        base_sleep=0.001,
+        max_sleep=0.002,
+    )
     with pytest.raises(TimeoutError):
         store.get("foo")
     assert flaky.calls > 10
+
+
+def _make_pooled_store(state, connections, client_factory):
+    """Create a SftpStore with a fake SSH connection, so that the channel
+    pool can be tested without paramiko. The factory is called to create
+    each SFTP channel; ``state`` counts what happens to them.
+    """
+
+    class FakeSshClient:
+        def __init__(self):
+            self._is_active = True
+            self.channels = []
+
+        def get_transport(self):
+            return self
+
+        def is_active(self):
+            return self._is_active
+
+        def open_sftp(self):
+            sftp = client_factory()
+            state["channels"] += 1
+            self.channels.append(sftp)
+            return sftp
+
+        def close(self):
+            self._is_active = False
+
+    class PooledSftpStore(SftpStore):
+        def _create_ssh_client(self):
+            state["ssh_connections"] += 1
+            return FakeSshClient()
+
+    return PooledSftpStore("", "/", connections=connections)
+
+
+def _make_instrumented_factory(state, op_duration=0.0, flaky_first=False):
+    guard = threading.Lock()
+    flaky_done = []  # mutable, to allow sharing between factory calls
+
+    def factory():
+        if flaky_first and not flaky_done:
+            flaky_done.append(True)
+            return FlakySftpClient(fail_times=1)
+        sftp = FakeSftpClient(STORE)
+        orig_open = sftp.open
+
+        def open_(path, mode="r"):
+            with guard:
+                state["n_open"] += 1
+                state["max_open"] = max(state["max_open"], state["n_open"])
+            if op_duration:
+                time.sleep(op_duration)
+            try:
+                return orig_open(path, mode)
+            finally:
+                with guard:
+                    state["n_open"] -= 1
+
+        sftp.open = open_
+        return sftp
+
+    return factory
+
+
+def test_sftp_store_single_channel_reused():
+    # With connections=1 (the default), all operations use a single channel
+    state = {"channels": 0, "ssh_connections": 0, "n_open": 0, "max_open": 0}
+    store = _make_pooled_store(
+        state, connections=1, client_factory=_make_instrumented_factory(state)
+    )
+    for _i in range(6):
+        assert store.get("foo") == b"hi foo"
+    assert state["channels"] == 1
+    assert state["ssh_connections"] == 1
+    store.close()
+
+
+def test_sftp_store_parallel_channels():
+    # With connections=4, multiple operations are in flight at the same time,
+    # and the store never uses more channels than that
+    state = {"channels": 0, "ssh_connections": 0, "n_open": 0, "max_open": 0}
+    store = _make_pooled_store(
+        state,
+        connections=4,
+        client_factory=_make_instrumented_factory(state, op_duration=0.005),
+    )
+
+    def worker():
+        for _i in range(15):
+            assert store.get("foo") == b"hi foo"
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert state["channels"] <= 4
+    assert state["max_open"] >= 2  # Without parallelism this would be 1
+    assert state["max_open"] <= 4
+    store.close()
+
+
+def test_sftp_store_broken_channel_replaced():
+    # A transient error closes the channel on which it occurred; the next
+    # operation uses a new one (or another one from the pool)
+    state = {"channels": 0, "ssh_connections": 0, "n_open": 0, "max_open": 0}
+    store = _make_pooled_store(
+        state,
+        connections=2,
+        client_factory=_make_instrumented_factory(state, flaky_first=True),
+    )
+
+    with pytest.raises(TimeoutError):
+        store.get("foo")
+    # The broken channel is closed, and the next attempt works
+    assert _first_channel(store).closed is True
+    assert store.get("foo") == b"hi foo"
+    assert store.get("bar") == b"hi bar"
+    store.close()
+
+
+def _first_channel(store):
+    # The store's fake SSH client keeps track of the channels that it opened
+    return store._client.channels[0]
 
 
 def test_wrapper_store():
