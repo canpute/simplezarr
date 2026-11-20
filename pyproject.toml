@@ -14,7 +14,7 @@ dependencies = ['numpy', 'numcodecs', 'google-crc32c>=1.5']
 [project.optional-dependencies]
 lint = ["ruff", "pre-commit"]
 docs = ["sphinx>7.2", "sphinx_rtd_theme"]
-tests = ["pytest", "pytest-cov"]
+tests = ["zarr", "pytest", "pytest-cov"]
 sftp = ["paramiko"]
 dev = ["simplezarr[lint,tests,docs,sftp]"]
 

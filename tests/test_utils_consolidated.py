@@ -732,6 +732,102 @@ def test_consolidated_kind_validation():
         open_zarr(store)
 
 
+# %%%%% Interop with zarr-python (skipped when it is not installed)
+
+
+def _interop_dir(tmp_path, name):
+    return str(tmp_path / name)
+
+
+def test_interop_zarr_python_reads_simplezarr(tmp_path):
+    # A file written and consolidated by simplezarr opens with zarr-python,
+    # from the consolidated metadata alone
+    zarr = pytest.importorskip("zarr")
+    from simplezarr import LocalStore
+
+    path = _interop_dir(tmp_path, "s2z")
+    store = LocalStore(path)
+    ZarrGroup.create(store, "", attributes={"author": "almar"})
+    ZarrArray.create(store, "arr0", (8, 6), "uint16")
+    ZarrGroup.create(store, "sub", attributes={"note": "nested"})
+    ZarrArray.create(store, "sub/arr1", (8, 6), "float32", chunk_shape=(4, 3))
+    consolidate_metadata(open_zarr(store))
+
+    group = zarr.open_group(zarr.storage.LocalStore(path, read_only=True), mode="r")
+    assert sorted(dict(group.members(max_depth=None)).keys()) == [
+        "arr0",
+        "sub",
+        "sub/arr1",
+    ]
+    assert group["sub/arr1"].shape == (8, 6)
+    assert group["sub/arr1"].dtype == np.dtype("float32")
+    assert group["sub/arr1"].chunks == (4, 3)
+    assert group["sub"].attrs["note"] == "nested"
+
+    # And with use_consolidated=True, even when the child zarr.jsons are
+    # not available (proving that the consolidated metadata is really used)
+    import pathlib
+
+    hidden = []
+    for p in sorted(pathlib.Path(path).rglob("zarr.json")):
+        if p.name == "zarr.json" and p.parent != pathlib.Path(path):
+            p.rename(p.with_suffix(".hidden"))
+            hidden.append(p.with_suffix(".hidden"))
+    try:
+        g2 = zarr.open_group(
+            zarr.storage.LocalStore(path, read_only=True), mode="r", use_consolidated=True
+        )
+        assert g2["sub/arr1"].shape == (8, 6)
+    finally:
+        for p in hidden:
+            p.rename(p.with_suffix(".json"))
+
+
+def test_interop_simplezarr_reads_zarr_python(tmp_path):
+    # A file written and consolidated by zarr-python opens with simplezarr,
+    # from the consolidated metadata alone
+    zarr = pytest.importorskip("zarr")
+    from simplezarr import LocalStore
+
+    path = _interop_dir(tmp_path, "z2s")
+    g = zarr.open_group(path, mode="w")
+    g.attrs["author"] = "tomaugspurger"
+    g.create_array("arr0", shape=(8, 6), dtype="uint16", chunks=(8, 6))
+    sub = g.create_group("sub")
+    sub.attrs["note"] = "nested"
+    sub.create_array("arr1", shape=(8, 6), dtype="float32", chunks=(4, 3))
+    with pytest.warns(UserWarning):
+        zarr.consolidate_metadata(path)
+
+    # The format matches the spec: kind, must_understand, flat relative keys
+    written = json.loads(open(f"{path}/zarr.json", "rb").read())
+    consolidated = written["consolidated_metadata"]
+    assert consolidated["kind"] == "inline"
+    assert consolidated["must_understand"] is False
+    assert sorted(consolidated["metadata"]) == ["arr0", "sub", "sub/arr1"]
+
+    # simplezarr opens it, using only the root zarr.json
+    class RootOnlyStore(LocalStore):
+        def _get(self, key):
+            if key != "zarr.json":
+                raise AssertionError(f"unexpected store request: {key!r}")
+            return super()._get(key)
+
+        def list_dir(self, prefix):
+            raise AssertionError("unexpected list_dir call")
+
+    group = open_zarr(RootOnlyStore(path))
+    assert [child.name for child in group.children] == ["arr0", "sub"]
+    assert group["sub/arr1"].shape == (8, 6)
+    assert group["sub/arr1"].dtype == "float32"
+    assert group["sub/arr1"].chunk_shape == (4, 3)
+    assert group["sub"].attributes == {"note": "nested"}
+
+    # Note: zarr-python's entries nest a consolidated_metadata field inside
+    # child-group entries (explicitly marking empty groups). simplezarr
+    # writes the leaner variant, which zarr-python reads equally well.
+
+
 def test_consolidate_metadata_empty():
     store = MemoryStore()
     ZarrGroup.create(store, "")
