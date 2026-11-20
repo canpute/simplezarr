@@ -13,6 +13,18 @@ Possible sections in each release:
 * Security: in case of vulnerabilities.
 
 
+## [1.3.0](https://github.com/almarklein/simplezarr/releases/tag/1.3.0) - 20-11-2026
+
+### What's Changed
+* Allow variational delay in the slow store by @almarklein in https://github.com/canpute/simplezarr/pull/61
+* Adopt alver release flow by @almarklein in https://github.com/canpute/simplezarr/pull/62
+* Better handling of store exceptions by @almarklein in https://github.com/canpute/simplezarr/pull/63
+* Add sftp store by @almarklein in https://github.com/canpute/simplezarr/pull/64
+* Support consolidated metadata by @almarklein in https://github.com/canpute/simplezarr/pull/65
+
+**Full Changelog**: https://github.com/canpute/simplezarr/compare/v1.2.1...1.3.0
+
+
 ## [v1.2.1](https://github.com/almarklein/simplezarr/releases/tag/v1.2.1) - 27-10-2026
 
 ### What's Changed
