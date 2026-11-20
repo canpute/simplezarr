@@ -475,6 +475,185 @@ def test_consolidate_unicode_names():
     )
 
 
+# %%%%% Reading via consolidated metadata
+
+
+class CountingStore(MemoryStore):
+    """A MemoryStore that counts the number of store requests per operation."""
+
+    def __init__(self):
+        self.requests = {}
+        super().__init__()
+
+    def _tick(self, name):
+        self.requests[name] = self.requests.get(name, 0) + 1
+
+    def _get(self, key):
+        self._tick("get")
+        return super()._get(key)
+
+    def _get_partial_values(self, key_ranges):
+        self._tick("get_partial_values")
+        return super()._get_partial_values(key_ranges)
+
+    def _list(self):
+        self._tick("list")
+        return super()._list()
+
+    def _list_dir(self, prefix):
+        self._tick("list_dir")
+        return super()._list_dir(prefix)
+
+    @property
+    def n_requests(self):
+        return sum(self.requests.values())
+
+
+def _compare_trees(node1, node2):
+    """Assert that two (freshly) opened trees are the same (modulo the
+    consolidated metadata that groups may have).
+    """
+    assert node1.__class__ is node2.__class__
+    assert node1.path == node2.path
+    meta1 = {k: v for k, v in node1.metadata.items() if k != "consolidated_metadata"}
+    meta2 = {k: v for k, v in node2.metadata.items() if k != "consolidated_metadata"}
+    assert meta1 == meta2, node1.path
+    assert node1.attributes == node2.attributes
+    if isinstance(node1, ZarrGroup):
+        names1 = [child.name for child in node1.children]
+        names2 = [child.name for child in node2.children]
+        assert names1 == names2, node1.path
+        for child1, child2 in zip(node1.children, node2.children, strict=True):
+            _compare_trees(child1, child2)
+
+
+def test_open_with_consolidated_metadata():
+    # Classic opening: a request per node (plus listing)
+    store = CountingStore()
+    create_test_zarr(store)
+    store.requests.clear()
+    classic = open_zarr(store)
+    assert store.n_requests > 6
+
+    # With consolidated metadata: exactly one request (the root zarr.json)
+    consolidate_metadata(classic)
+    store.requests.clear()
+    fresh = open_zarr(store)
+    assert store.requests == {"get": 1}
+
+    # The resulting tree is identical (modulo the consolidated entry)
+    _compare_trees(classic, fresh)
+
+
+def test_open_with_consolidated_metadata_recursive():
+    # Recursive consolidation: also a sub-group can be opened in one request
+    store = CountingStore()
+    create_test_zarr(store)
+    consolidate_metadata(open_zarr(store), recursive=True)
+
+    store.requests.clear()
+    sub = open_zarr(store, "sub")
+    assert store.requests == {"get": 1}
+    assert [child.name for child in sub.children] == ["array1", "group2"]
+    assert sub["group2/array2"].shape == (8, 6)
+
+    # A grandchild group likewise
+    store.requests.clear()
+    group2 = open_zarr(store, "sub/group2")
+    assert store.requests == {"get": 1}
+    assert [child.name for child in group2.children] == ["array2"]
+
+
+def test_open_with_consolidated_metadata_data_reads():
+    # Opening via consolidated metadata does not affect reading data
+    store = CountingStore()
+    create_test_zarr(store)
+    open_zarr(store)["sub/array1"].set_chunk_now((0, 0), np.arange(12, dtype="uint16").reshape(4, 3))
+    consolidate_metadata(open_zarr(store))
+
+    fresh = open_zarr(store)
+    store.requests.clear()
+    chunk = fresh["sub/array1"].get_chunk_now((0, 0))
+    np.testing.assert_array_equal(chunk, np.arange(12, dtype="uint16").reshape(4, 3))
+    # The chunk is loaded with a plain get (which allows e.g. SFTP prefetch)
+    assert store.requests == {"get": 1}
+
+
+def test_consolidated_open_trusts_metadata():
+    # A node that was added to the store after consolidation is not seen
+    # when the (stale) consolidated metadata is used; it is trusted as-is.
+    store = create_test_zarr()
+    consolidate_metadata(open_zarr(store))
+    ZarrArray.create(store, "new-array", (8, 6), "uint16")
+
+    group = open_zarr(store)
+    assert "new-array" not in [child.name for child in group.children]
+
+    # After re-consolidation it is there
+    consolidate_metadata(group)
+    group = open_zarr(store)
+    assert "new-array" in [child.name for child in group.children]
+    assert group["new-array"].shape == (8, 6)
+
+
+def test_consolidated_malformed():
+    # Cases that must raise, rather than silently dropping nodes
+    def set_root_consolidated(store, payload):
+        meta = json.loads(store.get("zarr.json").decode())
+        meta["consolidated_metadata"] = payload
+        store.set("zarr.json", json.dumps(meta).encode())
+
+    # Payload that is not a dict, and one without the metadata field
+    store = create_test_zarr()
+    set_root_consolidated(store, "not a dict")
+    with pytest.raises(RuntimeError, match="malformed"):
+        open_zarr(store)
+
+    store = create_test_zarr()
+    set_root_consolidated(store, {"kind": "auto"})
+    with pytest.raises(RuntimeError, match="malformed"):
+        open_zarr(store)
+
+    # Entry with an unexpected node_type
+    store = create_test_zarr()
+    set_root_consolidated(
+        store,
+        {"kind": "auto", "metadata": {"junk": {"zarr_format": 3, "node_type": "junk"}}},
+    )
+    with pytest.raises(RuntimeError, match="Unexpected node type"):
+        open_zarr(store)
+
+    # Nodes listed below an array
+    store = create_test_zarr()
+    entries = consolidate_metadata(open_zarr(store))["metadata"]
+    entries["array0/spam"] = {"zarr_format": 3, "node_type": "group"}
+    set_root_consolidated(store, {"kind": "auto", "metadata": entries})
+    with pytest.raises(RuntimeError, match="below"):
+        open_zarr(store)
+
+    # Nodes listed below a node that has no entry itself
+    store = create_test_zarr()
+    set_root_consolidated(
+        store,
+        {"kind": "auto", "metadata": {"ghost/spam": {"zarr_format": 3, "node_type": "array"}}},
+    )
+    with pytest.raises(RuntimeError, match="non-existing"):
+        open_zarr(store)
+
+    # A node without any metadata
+    store = create_test_zarr()
+    set_root_consolidated(store, {"kind": "auto", "metadata": {"": "nope"}})
+    with pytest.raises(RuntimeError, match="Malformed key"):
+        open_zarr(store)
+
+    # The malformed entries above all raised an error, but a normal
+    # consolidated file still opens fine
+    store = create_test_zarr()
+    consolidate_metadata(open_zarr(store))
+    group = open_zarr(store)
+    assert [child.name for child in group.children] == ["array0", "sub"]
+
+
 def test_consolidate_metadata_empty():
     store = MemoryStore()
     ZarrGroup.create(store, "")

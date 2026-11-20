@@ -96,10 +96,10 @@ def consolidate_metadata(group: ZarrGroup, *, recursive: bool = False) -> dict:
 
     # Read a fresh copy of the tree from the store. This raises (and writes
     # nothing) if the store is inconsistent, and makes sure that we
-    # consolidate exactly what is currently in the store.
-    fresh_tree = ZarrNode._from_path(store, path)
-    if not isinstance(fresh_tree, ZarrGroup):  # no-cover
-        raise RuntimeError(f"Unexpected node type {fresh_tree!r}")
+    # consolidate exactly what is currently in the store. Any existing
+    # consolidated metadata is ignored (use_consolidated=False), because
+    # it may be stale: the tree is built from the actual zarr.json files.
+    fresh_tree = ZarrNode._from_path(store, path, use_consolidated=False)
 
     # Collect the metadata of all descending nodes, depth-first. The
     # metadata is deep-copied, so that nothing that happens with the
