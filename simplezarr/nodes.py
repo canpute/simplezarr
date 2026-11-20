@@ -74,7 +74,7 @@ class ZarrNode:
 
         # The metadata of all descending nodes, as a mapping of relative
         # paths to node metadata, and only set when the zarr.json has
-        # consolidated metadata (see utils/consolidated.py). The children
+        # consolidated metadata (see utils/consolidate.py). The children
         # can then be resolved without any store request. When
         # ``use_consolidated`` is False, consolidated metadata is ignored
         # (also in descending nodes), e.g. when re-consolidating.
@@ -163,7 +163,7 @@ def _get_consolidated_map(metadata: dict, path: str) -> dict | None:
     """Get the consolidated metadata map of a group's metadata, or None if absent.
 
     The map is a mapping of relative paths to the metadata of the node at
-    that path (as written by ``simplezarr.utils.consolidated.consolidate_metadata()``).
+    that path (as written by ``simplezarr.utils.consolidate.consolidate_metadata()``).
     Per the v3 spec, "inline" is the only supported kind (the field is
     reserved for future use); a missing kind or "auto" (written by earlier
     versions of this library) is also accepted. Raises an error for other

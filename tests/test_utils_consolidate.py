@@ -2,7 +2,7 @@ import json
 
 from simplezarr.stores import MemoryStore
 from simplezarr.nodes import open_zarr, ZarrGroup, ZarrArray
-from simplezarr.utils.consolidated import consolidate_metadata
+from simplezarr.utils.consolidate import consolidate_metadata
 
 import numpy as np
 import pytest
