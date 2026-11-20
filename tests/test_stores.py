@@ -1,5 +1,8 @@
 from pathlib import Path
+import errno
 import shutil
+import stat
+import threading
 import time
 
 from simplezarr.stores import (
@@ -8,8 +11,10 @@ from simplezarr.stores import (
     WritableStore,
     ListableStore,
     SlowStore,
+    SftpStore,
     RetryStore,
 )
+from simplezarr.stores import _map_sftp_error
 from simplezarr.stores import check_key, check_prefix
 from simplezarr.stores import MemoryStore, LocalStore, WrapperStore
 
@@ -126,6 +131,152 @@ class RetryStoreTestable(RetryStore):
         super().__init__(MemoryStore(STORE), base_sleep=0.001, max_sleep=0.002)
 
 
+# %%%%% An in-memory fake of an SFTP server, so that the SftpStore can be tested
+# without paramiko or a server. It mimics the semantics of a real SFTP server:
+# files are stored under absolute posix paths, and errors are raised as OSError
+# instances (with an errno), like paramiko does.
+
+
+class FakeSftpAttr:
+    def __init__(self, filename, st_mode):
+        self.filename = filename
+        self.st_mode = st_mode
+
+
+class FakeSftpFile:
+    def __init__(self, fs, path, mode):
+        self._fs = fs
+        self._path = path
+        self._mode = mode
+        self._pos = 0
+        if mode in ("w", "wb"):
+            fs._files[path] = bytearray()
+
+    def seek(self, pos):
+        self._pos = pos
+        return self._pos
+
+    def read(self, length=None):
+        data = self._fs._files[self._path]
+        i2 = len(data) if length is None else min(len(data), self._pos + length)
+        result = bytes(data[self._pos : i2])
+        self._pos = i2
+        return result
+
+    def write(self, value):
+        data = self._fs._files[self._path]
+        value = bytes(value)
+        data[self._pos : self._pos + len(value)] = value
+        self._pos += len(value)
+        return len(value)
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+        return False
+
+
+class FakeSftpClient:
+    """In-memory stand-in for a paramiko SFTPClient."""
+
+    def __init__(self, fields=None):
+        self._files = {}  # absolute posix path -> bytearray
+        self.closed = False
+        if fields:
+            for key, value in fields.items():
+                self._files["/" + key] = bytearray(value)
+
+    def close(self):
+        self.closed = True
+
+    def _is_dir(self, path):
+        # Directories are registered implicitly, by the files that are in them
+        return any(k.startswith(path.rstrip("/") + "/") for k in self._files)
+
+    def _check_ancestors(self, path):
+        # Raise if any ancestor of the given path is a file
+        parts = [p for p in path.split("/") if p]
+        for i in range(1, len(parts)):
+            p = "/" + "/".join(parts[:i])
+            if p in self._files:
+                raise OSError(errno.ENOTDIR, "Not a directory", p)
+
+    def open(self, path, mode="r"):
+        self._check_ancestors(path)
+        if mode in ("w", "wb"):
+            if path in self._files or self._is_dir(path):
+                raise OSError(errno.EISDIR, "Is a directory", path)
+            return FakeSftpFile(self, path, mode)
+        if self._is_dir(path):
+            raise OSError(errno.EISDIR, "Is a directory", path)
+        if path not in self._files:
+            raise OSError(errno.ENOENT, "No such file", path)
+        return FakeSftpFile(self, path, mode)
+
+    def remove(self, path):
+        if path not in self._files:
+            raise OSError(errno.ENOENT, "No such file", path)
+        del self._files[path]
+
+    def mkdir(self, path):
+        self._check_ancestors(path)
+        if path in self._files:
+            raise OSError(errno.EEXIST, "File exists", path)
+        if self._is_dir(path):
+            raise OSError(errno.EEXIST, "File exists", path)
+        # Else no-op: directories are registered implicitly
+
+    def stat(self, path):
+        if path in self._files:
+            return FakeSftpAttr(path, stat.S_IFREG | 0o644)
+        if self._is_dir(path):
+            return FakeSftpAttr(path, stat.S_IFDIR | 0o755)
+        raise OSError(errno.ENOENT, "No such file", path)
+
+    def listdir_attr(self, path):
+        if path in self._files:
+            raise OSError(errno.ENOTDIR, "Not a directory", path)
+        if not self._is_dir(path):
+            raise OSError(errno.ENOENT, "No such file or directory", path)
+        prefix = path.rstrip("/") + "/"
+        entries = {}  # filename -> is a dir
+        for p in self._files:
+            if p.startswith(prefix):
+                rest = p[len(prefix) :]
+                name, _, _ = rest.partition("/")
+                entries[name] = "/" in rest
+        return [
+            FakeSftpAttr(name, (stat.S_IFDIR if is_dir else stat.S_IFREG) | 0o644)
+            for name, is_dir in entries.items()
+        ]
+
+
+class SftpStoreTestable(SftpStore):
+    def __init__(self):
+        super().__init__("", "/", sftp_client=FakeSftpClient(STORE))
+
+
+class FlakySftpClient(FakeSftpClient):
+    """A fake SFTP client that raises on the first ``fail_times`` open() calls."""
+
+    def __init__(self, fail_times=0, exc=None):
+        super().__init__(STORE)
+        self._fail_times = fail_times
+        self._exc = TimeoutError("flaky sftp: too slow") if exc is None else exc
+        self.calls = 0
+
+    def open(self, path, mode="r"):
+        self.calls += 1
+        if self.calls <= self._fail_times:
+            raise self._exc
+        return super().open(path, mode)
+
+
 class FlakyStore(MemoryStore):
     """A MemoryStore that raises the given exception on the first ``fail_times``
     calls of each operation. For testing retry behavior.
@@ -194,6 +345,7 @@ store_classes = [
     ListableStoreTestable,
     MemoryStoreTestable,
     LocalStoreTestable,
+    SftpStoreTestable,
     WrapperStoreTestable,
     SlowStoreTestable,
     RetryStoreTestable,
@@ -372,6 +524,241 @@ def test_local_store():
     assert isinstance(store.path, Path)
     assert "test-data" in str(store.path)
     assert "test-data" in repr(store)
+
+
+def test_sftp_store_paths():
+    # The keys map to files on the server, relative to the root path
+    fake = FakeSftpClient()
+    store = SftpStore("", "/", sftp_client=fake)
+    store.set("a/b", b"hi ab")
+    assert sorted(fake._files) == ["/a/b"]
+    assert store.list() == ["a/b"]
+    assert "SftpStore" in repr(store)
+
+    # And with a non-root path
+    fake = FakeSftpClient()
+    store = SftpStore("", "data/store", sftp_client=fake)
+    assert store.path == "/data/store"
+    store.set("a/b", b"hi ab")
+    store.set("a/c", b"hi ac")
+    assert sorted(fake._files) == ["/data/store/a/b", "/data/store/a/c"]
+    assert store.list() == ["a/b", "a/c"]
+    assert store.list_prefix("a/") == ["a/b", "a/c"]
+    assert store.list_dir("/") == ["a/"]
+    assert store.list_dir("a/") == ["a/b", "a/c"]
+
+    # Keys are always server paths, also for partial reads/writes
+    assert store.get_partial_values([("a/b", 3, 2)]) == [b"ab"]
+    store.set_partial_values([("a/b", 0, b"HI")])
+    assert fake._files["/data/store/a/b"] == b"HI ab"
+
+
+def test_sftp_store_errors():
+    store = SftpStoreTestable()
+
+    # Missing keys map to FileNotFoundError (retryable errors map to
+    # TimeoutError/ConnectionError, see the other tests)
+    with pytest.raises(FileNotFoundError):
+        store.get("doesnotexist")
+    with pytest.raises(FileNotFoundError):
+        store.get_partial_values([("doesnotexist", 0, 2)])
+    with pytest.raises(FileNotFoundError):
+        store.set_partial_values([("doesnotexist", 0, b"x")])
+    with pytest.raises(FileNotFoundError):
+        store.erase("doesnotexist")
+
+    # Cannot treat a file as a dir
+    with pytest.raises(NotADirectoryError):
+        store.set("foo/eggs", b"hi eggs")
+    store._dirs.clear()  # Also try again without the dir cache
+    with pytest.raises(NotADirectoryError):
+        store.set("foo/eggs", b"hi eggs")
+
+    # Cannot treat a dir as a file
+    with pytest.raises(IsADirectoryError):
+        store.set("dir1", b"hi dir1")
+
+
+def test_sftp_store_map_errors():
+    # Builtin errors (including TypeError etc.) are returned unchanged
+    for err in [
+        TimeoutError("too slow"),
+        ConnectionError("broken"),
+        FileNotFoundError("nope"),
+        PermissionError("no"),
+        TimeoutError(),
+        TypeError("wrong type"),
+        ValueError("wrong value"),
+        OSError("something generic"),
+    ]:
+        assert _map_sftp_error(err) is err
+
+    # EOFError means the connection was closed
+    assert isinstance(_map_sftp_error(EOFError()), ConnectionError)
+
+    # OSErrors with an errno map to the builtin error of the taxonomy
+    cases = [
+        (errno.ENOENT, FileNotFoundError),
+        (errno.EACCES, PermissionError),
+        (errno.EPERM, PermissionError),
+        (errno.ENOTDIR, NotADirectoryError),
+        (errno.EISDIR, IsADirectoryError),
+        (errno.ETIMEDOUT, TimeoutError),
+        (errno.ECONNREFUSED, ConnectionError),
+        (errno.ECONNRESET, ConnectionError),
+        (errno.EPIPE, ConnectionError),
+        (errno.EBADF, OSError),  # anything else stays an OSError
+    ]
+    for errno_, cls in cases:
+        mapped = _map_sftp_error(OSError(errno_, "fake"))
+        assert isinstance(mapped, cls), f"errno {errno_} should map to {cls.__name__}"
+        assert isinstance(mapped, OSError)
+
+
+def test_sftp_store_retry_integration():
+    # A transient error from the SFTP transport is retried by the RetryStore
+    flaky = FlakySftpClient(fail_times=1)
+    store = RetryStore(SftpStore("", "/", sftp_client=flaky), base_sleep=0.001)
+    assert store.get("foo") == b"hi foo"
+    assert flaky.calls == 2
+
+    # And with all attempts failing, the RetryStore raises a TimeoutError
+    flaky = FlakySftpClient(fail_times=10_000)
+    store = RetryStore(
+        SftpStore("", "/", sftp_client=flaky),
+        timeout=0.05,
+        base_sleep=0.001,
+        max_sleep=0.002,
+    )
+    with pytest.raises(TimeoutError):
+        store.get("foo")
+    assert flaky.calls > 10
+
+
+def _make_pooled_store(state, connections, client_factory):
+    """Create a SftpStore with a fake SSH connection, so that the channel
+    pool can be tested without paramiko. The factory is called to create
+    each SFTP channel; ``state`` counts what happens to them.
+    """
+
+    class FakeSshClient:
+        def __init__(self):
+            self._is_active = True
+            self.channels = []
+
+        def get_transport(self):
+            return self
+
+        def is_active(self):
+            return self._is_active
+
+        def open_sftp(self):
+            sftp = client_factory()
+            state["channels"] += 1
+            self.channels.append(sftp)
+            return sftp
+
+        def close(self):
+            self._is_active = False
+
+    class PooledSftpStore(SftpStore):
+        def _create_ssh_client(self):
+            state["ssh_connections"] += 1
+            return FakeSshClient()
+
+    return PooledSftpStore("", "/", connections=connections)
+
+
+def _make_instrumented_factory(state, op_duration=0.0, flaky_first=False):
+    guard = threading.Lock()
+    flaky_done = []  # mutable, to allow sharing between factory calls
+
+    def factory():
+        if flaky_first and not flaky_done:
+            flaky_done.append(True)
+            return FlakySftpClient(fail_times=1)
+        sftp = FakeSftpClient(STORE)
+        orig_open = sftp.open
+
+        def open_(path, mode="r"):
+            with guard:
+                state["n_open"] += 1
+                state["max_open"] = max(state["max_open"], state["n_open"])
+            if op_duration:
+                time.sleep(op_duration)
+            try:
+                return orig_open(path, mode)
+            finally:
+                with guard:
+                    state["n_open"] -= 1
+
+        sftp.open = open_
+        return sftp
+
+    return factory
+
+
+def test_sftp_store_single_channel_reused():
+    # With connections=1 (the default), all operations use a single channel
+    state = {"channels": 0, "ssh_connections": 0, "n_open": 0, "max_open": 0}
+    store = _make_pooled_store(
+        state, connections=1, client_factory=_make_instrumented_factory(state)
+    )
+    for _i in range(6):
+        assert store.get("foo") == b"hi foo"
+    assert state["channels"] == 1
+    assert state["ssh_connections"] == 1
+    store.close()
+
+
+def test_sftp_store_parallel_channels():
+    # With connections=4, multiple operations are in flight at the same time,
+    # and the store never uses more channels than that
+    state = {"channels": 0, "ssh_connections": 0, "n_open": 0, "max_open": 0}
+    store = _make_pooled_store(
+        state,
+        connections=4,
+        client_factory=_make_instrumented_factory(state, op_duration=0.005),
+    )
+
+    def worker():
+        for _i in range(15):
+            assert store.get("foo") == b"hi foo"
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert state["channels"] <= 4
+    assert state["max_open"] >= 2  # Without parallelism this would be 1
+    assert state["max_open"] <= 4
+    store.close()
+
+
+def test_sftp_store_broken_channel_replaced():
+    # A transient error closes the channel on which it occurred; the next
+    # operation uses a new one (or another one from the pool)
+    state = {"channels": 0, "ssh_connections": 0, "n_open": 0, "max_open": 0}
+    store = _make_pooled_store(
+        state,
+        connections=2,
+        client_factory=_make_instrumented_factory(state, flaky_first=True),
+    )
+
+    with pytest.raises(TimeoutError):
+        store.get("foo")
+    # The broken channel is closed, and the next attempt works
+    assert _first_channel(store).closed is True
+    assert store.get("foo") == b"hi foo"
+    assert store.get("bar") == b"hi bar"
+    store.close()
+
+
+def _first_channel(store):
+    # The store's fake SSH client keeps track of the channels that it opened
+    return store._client.channels[0]
 
 
 def test_wrapper_store():

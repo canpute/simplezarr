@@ -15,7 +15,8 @@ dependencies = ['numpy', 'numcodecs', 'google-crc32c>=1.5']
 lint = ["ruff", "pre-commit"]
 docs = ["sphinx>7.2", "sphinx_rtd_theme"]
 tests = ["pytest", "pytest-cov"]
-dev = ["simplezarr[lint,tests,docs]"]
+sftp = ["paramiko"]
+dev = ["simplezarr[lint,tests,docs,sftp]"]
 
 [project.urls]
 Homepage = "https://github.com/canpute/simplezarr"
