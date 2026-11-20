@@ -32,7 +32,7 @@ from ..stores import WritableStore
 __all__ = ["consolidate_metadata"]
 
 
-def consolidate_metadata(group: ZarrGroup) -> dict:
+def consolidate_metadata(group: ZarrGroup, *, recursive: bool = False) -> dict:
     """Write the consolidated metadata of the hierarchy below the given group.
 
     Traverse the hierarchy below the given group, collect the metadata of
@@ -45,9 +45,14 @@ def consolidate_metadata(group: ZarrGroup) -> dict:
         group : ZarrGroup
             The group to consolidate the metadata for. Must be a group, and
             its store must be writable.
+        recursive : bool
+            If True (default False), also write consolidated metadata in each
+            descending group, each covering the hierarchy below that group
+            (with keys relative to it). This makes it possible to open any
+            sub-tree from a single request.
 
     Returns:
-        The consolidated metadata dict that was written.
+        The consolidated metadata dict that was written for the given group.
 
     """
 
@@ -61,32 +66,52 @@ def consolidate_metadata(group: ZarrGroup) -> dict:
             f"consolidate_metadata() requires a writable store, got {group.store!r}"
         )
 
-    # Collect the metadata of all descending nodes, depth-first
-    def get_meta(node: ZarrGroup, prefix: str) -> dict:
-        collected = {}
+    # Collect the metadata of all descending nodes, depth-first.
+    # A possible consolidated entry on a child group is dropped, because
+    # our own entry covers the full hierarchy below the top group.
+    entries = {}  # path -> metadata of the node at that path (without consolidation)
+    sub_groups = {}  # path -> node object (descending groups only)
+
+    def collect(node: ZarrGroup, prefix: str) -> None:
         for child in node.children:
             path = join(prefix, child.name)
             child_metadata = dict(child.metadata)
             if isinstance(child, ZarrGroup):
                 child_metadata.pop("consolidated_metadata", None)
-                # Our own consolidated entry covers the full hierarchy below
-                # the top group, so a (possibly stale) entry on a child group
-                # must not be copied along.
-            collected[path] = child_metadata
-            if isinstance(child, ZarrGroup):
-                collected.update(get_meta(child, path))
-        return collected
+                entries[path] = child_metadata
+                sub_groups[path] = child
+                collect(child, path)
+            else:
+                entries[path] = child_metadata
 
-    consolidated_metadata = {"kind": "auto", "metadata": get_meta(group, "")}
+    collect(group, "")
 
-    # Write the zarr.json of the group, with the consolidated metadata added
-    metadata = dict(group.metadata)
-    metadata.pop("consolidated_metadata", None)  # In case we overwrite a previous version
-    metadata["consolidated_metadata"] = consolidated_metadata
-    json_text = json.dumps(metadata, indent=4)
-    group.store.set(join(group.path, "zarr.json"), json_text.encode())
+    # Write the consolidated metadata for the top group
+    consolidated_metadata = {"kind": "auto", "metadata": entries}
+    _write(group, consolidated_metadata)
 
-    # Keep the in-memory node in sync with the store
-    group._metadata = metadata
+    # And optionally for each descending group, with paths relative to it
+    if recursive:
+        for path, node in sub_groups.items():
+            prefix = path + "/"
+            sub_entries = {
+                key[len(prefix) :]: meta
+                for key, meta in entries.items()
+                if key.startswith(prefix)
+            }
+            _write(node, {"kind": "auto", "metadata": sub_entries})
 
     return consolidated_metadata
+
+
+def _write(node: ZarrGroup, consolidated_metadata: dict) -> None:
+    # Write the zarr.json of the given node, with the consolidated metadata
+    # added (replacing any previous version), and update its in-memory
+    # metadata so it stays in sync with the store.
+    metadata = dict(node.metadata)
+    metadata.pop("consolidated_metadata", None)
+    metadata["consolidated_metadata"] = consolidated_metadata
+
+    json_text = json.dumps(metadata, indent=4)
+    node.store.set(join(node.path, "zarr.json"), json_text.encode())
+    node._metadata = metadata

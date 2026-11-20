@@ -133,6 +133,97 @@ def test_consolidate_metadata_sub_group():
     assert "consolidated_metadata" in sub_meta
 
 
+def test_consolidate_metadata_recursive():
+    store = create_test_zarr()
+    group = open_zarr(store)
+
+    top_meta = consolidate_metadata(group, recursive=True)
+
+    # The return value is the entry of the top group (unchanged behavior)
+    assert list(top_meta["metadata"].keys()) == [
+        "array0",
+        "sub",
+        "sub/array1",
+        "sub/group2",
+        "sub/group2/array2",
+    ]
+
+    # Each descending group has its own entry, with paths relative to it
+    root_meta = json.loads(store.get("zarr.json").decode())
+    sub_meta = json.loads(store.get("sub/zarr.json").decode())
+    group2_meta = json.loads(store.get("sub/group2/zarr.json").decode())
+
+    assert list(root_meta["consolidated_metadata"]["metadata"].keys()) == [
+        "array0",
+        "sub",
+        "sub/array1",
+        "sub/group2",
+        "sub/group2/array2",
+    ]
+    assert list(sub_meta["consolidated_metadata"]["metadata"].keys()) == [
+        "array1",
+        "group2",
+        "group2/array2",
+    ]
+    assert list(group2_meta["consolidated_metadata"]["metadata"].keys()) == [
+        "array2",
+    ]
+
+    # Each sub-entry matches the zarr.json of that node, modulo the
+    # consolidated metadata that the recursive writing adds to sub-groups
+    for rel_path, metadata in sub_meta["consolidated_metadata"]["metadata"].items():
+        on_disk = json.loads(store.get(f"sub/{rel_path}/zarr.json").decode())
+        on_disk.pop("consolidated_metadata", None)
+        assert metadata == on_disk, rel_path
+
+    # The groups' other metadata is preserved, also that of the sub-groups
+    assert sub_meta["zarr_format"] == 3
+    assert sub_meta["node_type"] == "group"
+
+    # Arrays do not get consolidated metadata
+    array0_meta = json.loads(store.get("array0/zarr.json").decode())
+    assert "consolidated_metadata" not in array0_meta
+
+
+def test_consolidate_metadata_recursive_twice():
+    # A second (recursive) consolidation replaces all previous entries
+    store = create_test_zarr()
+    group = open_zarr(store)
+    consolidate_metadata(group, recursive=True)
+
+    ZarrArray.create(store, "sub/array3", (8, 6), "uint16")
+    group = open_zarr(store)
+    consolidate_metadata(group, recursive=True)
+
+    root_meta = json.loads(store.get("zarr.json").decode())
+    sub_meta = json.loads(store.get("sub/zarr.json").decode())
+    assert "sub/array3" in root_meta["consolidated_metadata"]["metadata"]
+    assert "array3" in sub_meta["consolidated_metadata"]["metadata"]
+    assert list(sub_meta.keys()).count("consolidated_metadata") == 1
+    # The kind fields are all "auto"
+    assert root_meta["consolidated_metadata"]["kind"] == "auto"
+    assert sub_meta["consolidated_metadata"]["kind"] == "auto"
+
+
+def test_consolidate_metadata_default_not_recursive():
+    # Without recursive=True, the sub-groups are not touched
+    store = create_test_zarr()
+    group = open_zarr(store)
+    consolidate_metadata(group)
+
+    sub_meta = json.loads(store.get("sub/zarr.json").decode())
+    group2_meta = json.loads(store.get("sub/group2/zarr.json").decode())
+    assert "consolidated_metadata" not in sub_meta
+    assert "consolidated_metadata" not in group2_meta
+
+    # And the entry at the top correctly drops nothing (the sub-group
+    # metadata shown there is the plain group metadata)
+    root_meta = json.loads(store.get("zarr.json").decode())
+    assert "consolidated_metadata" not in root_meta["consolidated_metadata"]["metadata"][
+        "sub"
+    ]
+
+
 def test_consolidate_metadata_empty():
     store = MemoryStore()
     ZarrGroup.create(store, "")
