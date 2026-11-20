@@ -7,10 +7,13 @@
 # all descending nodes is written into the zarr.json of the top group, so
 # that the whole tree can be known from a single request.
 #
-# The consolidated metadata is stored as an entry in the group's metadata::
+# The consolidated metadata is stored as an entry in the group's metadata,
+# following the v3 spec (see the "consolidated_metadata" section of
+# https://zarr-specs.readthedocs.io)::
 #
 #     "consolidated_metadata": {
-#         "kind": "auto",
+#         "kind": "inline",
+#         "must_understand": false,
 #         "metadata": {
 #             "array1": {...},
 #             "sub/array2": {...},
@@ -18,9 +21,11 @@
 #         }
 #     }
 #
-# The keys in ``metadata`` are the paths of the nodes relative to the top
-# group (so the top group itself is not included), and the values are the
-# full metadata of each node (i.e. the content of its zarr.json).
+# The keys in ``metadata`` are the paths of the nodes relative to the node at
+# which the metadata is consolidated (i.e. the top group, which itself is not
+# included), and the values are the full metadata of each node (i.e. the
+# content of its zarr.json). The ``must_understand`` field signals to readers
+# that don't know about consolidated metadata that they may ignore it.
 #
 # This code is written with a strong focus on never corrupting existing
 # metadata. It therefore guarantees:
@@ -49,6 +54,14 @@ from ..nodes import ZarrGroup, ZarrNode, join
 from ..stores import WritableStore
 
 __all__ = ["consolidate_metadata"]
+
+
+def _inline_metadata(entries: dict) -> dict:
+    # Build the consolidated metadata object, as defined by the v3 spec.
+    # The "kind" field is reserved for future use ("inline" is the only
+    # supported value), and "must_understand: false" allows readers that
+    # don't know about consolidated metadata to still open the file.
+    return {"kind": "inline", "must_understand": False, "metadata": entries}
 
 
 def consolidate_metadata(group: ZarrGroup, *, recursive: bool = False) -> dict:
@@ -135,10 +148,10 @@ def consolidate_metadata(group: ZarrGroup, *, recursive: bool = False) -> dict:
                 for key, meta in entries.items()
                 if key.startswith(prefix)
             }
-            _write(node, node, {"kind": "auto", "metadata": sub_entries})
+            _write(node, node, _inline_metadata(sub_entries))
 
     # Write the consolidated metadata for the top group
-    consolidated_metadata = {"kind": "auto", "metadata": entries}
+    consolidated_metadata = _inline_metadata(entries)
     _write(group, fresh_tree, consolidated_metadata)
 
     return consolidated_metadata

@@ -34,8 +34,9 @@ def test_consolidate_metadata():
 
     meta = consolidate_metadata(group)
 
-    # The returned dict has the expected shape
-    assert meta["kind"] == "auto"
+    # The returned dict follows the v3 spec
+    assert meta["kind"] == "inline"
+    assert meta["must_understand"] is False
     assert list(meta["metadata"].keys()) == [
         "array0",
         "sub",
@@ -72,7 +73,8 @@ def test_consolidate_metadata_is_written():
     assert root_meta["zarr_format"] == 3
     assert root_meta["node_type"] == "group"
     assert root_meta["attributes"] == {"spam": "ham"}
-    assert root_meta["consolidated_metadata"]["kind"] == "auto"
+    assert root_meta["consolidated_metadata"]["kind"] == "inline"
+    assert root_meta["consolidated_metadata"]["must_understand"] is False
 
     # The in-memory node is in sync with what is on disk
     assert group.metadata == root_meta
@@ -201,9 +203,10 @@ def test_consolidate_metadata_recursive_twice():
     assert "sub/array3" in root_meta["consolidated_metadata"]["metadata"]
     assert "array3" in sub_meta["consolidated_metadata"]["metadata"]
     assert list(sub_meta.keys()).count("consolidated_metadata") == 1
-    # The kind fields are all "auto"
-    assert root_meta["consolidated_metadata"]["kind"] == "auto"
-    assert sub_meta["consolidated_metadata"]["kind"] == "auto"
+    # The kind fields are all "inline", per the spec
+    assert root_meta["consolidated_metadata"]["kind"] == "inline"
+    assert root_meta["consolidated_metadata"]["must_understand"] is False
+    assert sub_meta["consolidated_metadata"]["kind"] == "inline"
 
 
 def test_consolidate_metadata_default_not_recursive():
@@ -349,7 +352,7 @@ def test_consolidate_metadata_isolated():
 
     # The store is untouched by the mutations
     rooted = json.loads(store.get("zarr.json").decode())
-    assert rooted["consolidated_metadata"]["kind"] == "auto"
+    assert rooted["consolidated_metadata"]["kind"] == "inline"
     assert rooted["consolidated_metadata"]["metadata"]["sub"]["node_type"] == "group"
     sub_attr = rooted["consolidated_metadata"]["metadata"]["sub"].get("attributes", {})
     assert "injected" not in sub_attr
@@ -386,7 +389,7 @@ def test_consolidate_metadata_uses_fresh_metadata():
     sub_meta = json.loads(store.get("sub/zarr.json").decode())
     assert sub_meta["attributes"] == {"fresh": True}
     assert "consolidated_metadata" in sub_meta
-    assert sub_meta["consolidated_metadata"]["kind"] == "auto"
+    assert sub_meta["consolidated_metadata"]["kind"] == "inline"
 
 
 def test_consolidate_recursive_failure_leaves_top_untouched():
@@ -419,7 +422,8 @@ def test_consolidate_recursive_failure_leaves_top_untouched():
     consolidate_metadata(open_zarr(store), recursive=True)
     for path in ["zarr.json", "sub/zarr.json", "sub/group2/zarr.json"]:
         meta = json.loads(store.get(path).decode())
-        assert meta["consolidated_metadata"]["kind"] == "auto"
+        assert meta["consolidated_metadata"]["kind"] == "inline"
+        assert meta["consolidated_metadata"]["must_understand"] is False
         assert isinstance(meta["consolidated_metadata"]["metadata"], dict)
 
 
@@ -435,7 +439,8 @@ def test_consolidate_attributes_named_consolidated():
     for path in ["", "sub"]:
         meta = json.loads(store.get(f"{path}/zarr.json".lstrip("/")).decode())
         assert meta["attributes"]["consolidated_metadata"] == {"user": "data"}
-        assert meta["consolidated_metadata"]["kind"] == "auto"
+        assert meta["consolidated_metadata"]["kind"] == "inline"
+        assert meta["consolidated_metadata"]["must_understand"] is False
     # The sub-group's entry in the top-level consolidation contains the
     # user's attributes too
     root_meta = json.loads(store.get("zarr.json").decode())
@@ -610,7 +615,7 @@ def test_consolidated_malformed():
         open_zarr(store)
 
     store = create_test_zarr()
-    set_root_consolidated(store, {"kind": "auto"})
+    set_root_consolidated(store, {"kind": "inline"})
     with pytest.raises(RuntimeError, match="malformed"):
         open_zarr(store)
 
@@ -618,7 +623,7 @@ def test_consolidated_malformed():
     store = create_test_zarr()
     set_root_consolidated(
         store,
-        {"kind": "auto", "metadata": {"junk": {"zarr_format": 3, "node_type": "junk"}}},
+        {"kind": "inline", "metadata": {"junk": {"zarr_format": 3, "node_type": "junk"}}},
     )
     with pytest.raises(RuntimeError, match="Unexpected node type"):
         open_zarr(store)
@@ -627,7 +632,7 @@ def test_consolidated_malformed():
     store = create_test_zarr()
     entries = consolidate_metadata(open_zarr(store))["metadata"]
     entries["array0/spam"] = {"zarr_format": 3, "node_type": "group"}
-    set_root_consolidated(store, {"kind": "auto", "metadata": entries})
+    set_root_consolidated(store, {"kind": "inline", "metadata": entries})
     with pytest.raises(RuntimeError, match="below"):
         open_zarr(store)
 
@@ -635,14 +640,14 @@ def test_consolidated_malformed():
     store = create_test_zarr()
     set_root_consolidated(
         store,
-        {"kind": "auto", "metadata": {"ghost/spam": {"zarr_format": 3, "node_type": "array"}}},
+        {"kind": "inline", "metadata": {"ghost/spam": {"zarr_format": 3, "node_type": "array"}}},
     )
     with pytest.raises(RuntimeError, match="non-existing"):
         open_zarr(store)
 
     # A node without any metadata
     store = create_test_zarr()
-    set_root_consolidated(store, {"kind": "auto", "metadata": {"": "nope"}})
+    set_root_consolidated(store, {"kind": "inline", "metadata": {"": "nope"}})
     with pytest.raises(RuntimeError, match="Malformed key"):
         open_zarr(store)
 
@@ -654,12 +659,85 @@ def test_consolidated_malformed():
     assert [child.name for child in group.children] == ["array0", "sub"]
 
 
+def test_consolidated_matches_spec():
+    # Check the written consolidated metadata against the v3 spec
+    # (docs/v3/core/v3.0.rst, "consolidated_metadata" section)
+    store = create_test_zarr()
+    consolidate_metadata(open_zarr(store), recursive=True)
+
+    for path in ["", "sub", "sub/group2"]:
+        meta = json.loads(store.get(f"{path}/zarr.json".lstrip("/")).decode())
+        consolidated = meta["consolidated_metadata"]
+
+        # The "kind" field must be the string literal 'inline'
+        assert consolidated["kind"] == "inline"
+
+        # The "must_understand" field must be the boolean literal False,
+        # so that readers that don't know about consolidated metadata
+        # can ignore it rather than failing to open the file
+        assert consolidated["must_understand"] is False
+
+        # The metadata must be a flat map, with the paths of ALL children
+        # (recursively), relative to the node at which it is consolidated
+        for key, node_meta in consolidated["metadata"].items():
+            assert isinstance(key, str), key
+            assert node_meta["zarr_format"] == 3
+            assert node_meta["node_type"] in ("group", "array")
+
+    # Keys relative to the consolidating group (spec examples B and C)
+    root_meta = json.loads(store.get("zarr.json").decode())
+    sub_meta = json.loads(store.get("sub/zarr.json").decode())
+    group2_meta = json.loads(store.get("sub/group2/zarr.json").decode())
+    assert "sub/group2/array2" in root_meta["consolidated_metadata"]["metadata"]
+    assert "group2/array2" in sub_meta["consolidated_metadata"]["metadata"]
+    assert "array2" in group2_meta["consolidated_metadata"]["metadata"]
+    # ... and no node list itself
+    assert all(
+        key not in root_meta["consolidated_metadata"]["metadata"]
+        for key in ["", ".", "/", "zarr.json"]
+    )
+
+
+def test_consolidated_kind_validation():
+    # Legacy files (written by earlier versions of this library, with
+    # kind "auto") and files without a kind still open
+    def set_root_consolidated(store, payload):
+        meta = json.loads(store.get("zarr.json").decode())
+        meta["consolidated_metadata"] = payload
+        store.set("zarr.json", json.dumps(meta).encode())
+
+    store = create_test_zarr()
+    consolidate_metadata(open_zarr(store))
+    entries = json.loads(store.get("zarr.json").decode())["consolidated_metadata"]
+    entries.pop("kind")
+    set_root_consolidated(store, entries)
+    group = open_zarr(store)
+    assert [child.name for child in group.children] == ["array0", "sub"]
+
+    store = create_test_zarr()
+    consolidate_metadata(open_zarr(store))
+    entries = json.loads(store.get("zarr.json").decode())["consolidated_metadata"]
+    entries["kind"] = "auto"
+    set_root_consolidated(store, entries)
+    group = open_zarr(store)
+    assert [child.name for child in group.children] == ["array0", "sub"]
+
+    # But an unsupported kind raises, rather than being misinterpreted
+    store = create_test_zarr()
+    consolidate_metadata(open_zarr(store))
+    entries = json.loads(store.get("zarr.json").decode())["consolidated_metadata"]
+    entries["kind"] = "remote"  # a possible future kind
+    set_root_consolidated(store, entries)
+    with pytest.raises(RuntimeError, match="kind"):
+        open_zarr(store)
+
+
 def test_consolidate_metadata_empty():
     store = MemoryStore()
     ZarrGroup.create(store, "")
     group = open_zarr(store)
     meta = consolidate_metadata(group)
-    assert meta == {"kind": "auto", "metadata": {}}
+    assert meta == {"kind": "inline", "must_understand": False, "metadata": {}}
 
 
 def test_consolidate_metadata_checks():

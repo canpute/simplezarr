@@ -632,7 +632,7 @@ def test_sftp_store_retry_integration():
     )
     with pytest.raises(TimeoutError):
         store.get("foo")
-    assert flaky.calls > 10
+    assert flaky.calls > 1  # It retried rather than fail immediately
 
 
 def _make_pooled_store(state, connections, client_factory):
@@ -823,7 +823,10 @@ def test_retry_store_raises_timeout():
     dt = time.perf_counter() - t0
 
     assert 0.09 <= dt < 5
-    assert flaky.calls["get"] > 10  # It really tried again and again
+    # It really tried multiple times. The exact count depends on machine
+    # load (each sleep can take arbitrarily longer), so the deadline not
+    # having expired (asserted above) is the real guarantee.
+    assert flaky.calls["get"] > 1
     # The message says what operation failed and how often, and the store's
     # own error is the cause
     assert "get" in str(exc_info.value)

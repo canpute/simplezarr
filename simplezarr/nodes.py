@@ -164,7 +164,10 @@ def _get_consolidated_map(metadata: dict, path: str) -> dict | None:
 
     The map is a mapping of relative paths to the metadata of the node at
     that path (as written by ``simplezarr.utils.consolidated.consolidate_metadata()``).
-    Raises an error if the entry is present but malformed.
+    Per the v3 spec, "inline" is the only supported kind (the field is
+    reserved for future use); a missing kind or "auto" (written by earlier
+    versions of this library) is also accepted. Raises an error for other
+    kinds, or if the entry is malformed.
     """
     consolidated = metadata.get("consolidated_metadata", None)
     if consolidated is None:
@@ -175,6 +178,12 @@ def _get_consolidated_map(metadata: dict, path: str) -> dict | None:
     ):
         raise RuntimeError(
             f"The zarr.json of {path!r} has a malformed 'consolidated_metadata' entry."
+        )
+    kind = consolidated.get("kind", None)
+    if kind not in ("inline", None, "auto"):
+        raise RuntimeError(
+            f"The zarr.json of {path!r} has consolidated metadata of kind {kind!r}, "
+            f"which is not supported (re-consolidate the file to use it)."
         )
     return consolidated["metadata"]
 
