@@ -4,6 +4,7 @@ from simplezarr.stores import MemoryStore
 from simplezarr.nodes import open_zarr, ZarrGroup, ZarrArray
 from simplezarr.utils.consolidated import consolidate_metadata
 
+import numpy as np
 import pytest
 
 
@@ -222,6 +223,256 @@ def test_consolidate_metadata_default_not_recursive():
     assert "consolidated_metadata" not in root_meta["consolidated_metadata"]["metadata"][
         "sub"
     ]
+
+
+# %%%%% The following tests are focused on making sure that consolidation
+# can never corrupt existing metadata.
+
+
+def _store_snapshot(store):
+    return {key: bytes(value) for key, value in store.dict.items()}
+
+
+class FailOnSetStore(MemoryStore):
+    """A MemoryStore that fails all writes to ``fail_on_key`` (when set)."""
+
+    def __init__(self, fields=None):
+        self.fail_on_key = None
+        super().__init__(fields)
+
+    def set(self, key, value):
+        if key == self.fail_on_key:
+            raise IOError(f"Cannot write {key!r} (simulated failure)")
+        return super().set(key, value)
+
+
+def _gnarly_value():
+    # A metadata value with all the JSON edge cases we can think of
+    return {
+        "str": "ünïcödé with \" quotes and a 🌍",
+        "int": 42,
+        "float": 1.25e-300,
+        "bool_true": True,
+        "bool_false": False,
+        "null": None,
+        "list": [1, "two", None, [True, {"nested": ["deeply"]}]],
+        "dict": {"b": 2, "a": 1, "": "empty key"},
+        "float_int_zero": 0.0,
+    }
+
+
+def test_consolidate_preserves_gnarly_metadata():
+    store = create_test_zarr()
+    # Add all kinds of tricky values, at the top and in the sub-groups
+    ZarrGroup.create(
+        store, "", attributes={"spam": "ham", "gnarly": _gnarly_value()}
+    )
+    ZarrGroup.create(store, "sub", attributes={"gnarly": _gnarly_value()})
+    ZarrArray.create(store, "array0", (8, 6), "uint16", attributes={"gnarly": _gnarly_value()})
+
+    group = open_zarr(store)
+    before = {key: store.get(key) for key in
+              ["zarr.json", "sub/zarr.json", "sub/group2/zarr.json", "array0/zarr.json"]}
+
+    consolidate_metadata(group, recursive=True)
+
+    for key, before_text in before.items():
+        meta_before = json.loads(before_text.decode())
+        meta_after = json.loads(store.get(key).decode())
+        meta_after.pop("consolidated_metadata", None)
+        meta_before.pop("consolidated_metadata", None)
+        assert meta_after == meta_before, key
+
+    # Verify that the gnarly values survive the round trip through the
+    # consolidated entries too
+    root_meta = json.loads(store.get("zarr.json").decode())
+    sub_entry = root_meta["consolidated_metadata"]["metadata"]["sub"]
+    assert sub_entry["attributes"]["gnarly"] == _gnarly_value()
+    assert (
+        root_meta["attributes"]["gnarly"] == _gnarly_value()
+    )  # the root keeps its own attributes
+
+
+def test_consolidate_touched_files_only():
+    # Non-recursive: only the top zarr.json is modified, nothing else
+    store = create_test_zarr()
+    # Add a chunk (binary data) to make sure that it is not touched
+    open_zarr(store)["sub/array1"].set_chunk_now((0, 0), np.ones((4, 3), "uint16"))
+
+    before = _store_snapshot(store)
+    consolidate_metadata(open_zarr(store))
+    after = _store_snapshot(store)
+
+    changed = [key for key in before if before[key] != after[key]]
+    assert changed == ["zarr.json"]
+    assert not (set(after) - set(before))  # no new files
+
+    # Recursive: only the zarr.jsons of the groups are modified
+    before = _store_snapshot(store)
+    consolidate_metadata(open_zarr(store), recursive=True)
+    after = _store_snapshot(store)
+
+    changed = [key for key in before if before[key] != after[key]]
+    assert changed == ["sub/zarr.json", "sub/group2/zarr.json"]  # top already had it
+    assert not (set(after) - set(before))
+
+    # After consolidation, the file opens fine, with all metadata valid
+    group = open_zarr(store)
+    assert group["sub/group2/array2"].shape == (8, 6)
+
+
+def test_consolidate_metadata_idempotent():
+    # A second consolidation (non-recursive and recursive) writes the exact
+    # same bytes as the first, no drift
+    store = create_test_zarr()
+    consolidate_metadata(open_zarr(store))
+    consolidate_metadata(open_zarr(store), recursive=True)
+    snap1 = _store_snapshot(store)
+    consolidate_metadata(open_zarr(store))
+    consolidate_metadata(open_zarr(store), recursive=True)
+    snap2 = _store_snapshot(store)
+    assert snap1 == snap2
+
+
+def test_consolidate_metadata_isolated():
+    # The returned metadata shares no state with the store or the nodes:
+    # mutating it cannot corrupt anything
+    store = create_test_zarr()
+    group = open_zarr(store)
+    returned = consolidate_metadata(group)
+
+    # Mutate the returned structure
+    returned["kind"] = "MUTATED"
+    returned["metadata"]["sub"]["node_type"] = "MUTATED"
+    returned["metadata"]["sub"]["injected"] = True
+    returned["metadata"].clear()
+
+    # The store is untouched by the mutations
+    rooted = json.loads(store.get("zarr.json").decode())
+    assert rooted["consolidated_metadata"]["kind"] == "auto"
+    assert rooted["consolidated_metadata"]["metadata"]["sub"]["node_type"] == "group"
+    sub_attr = rooted["consolidated_metadata"]["metadata"]["sub"].get("attributes", {})
+    assert "injected" not in sub_attr
+
+    # Mutating the node does not affect the store
+    group.metadata["attributes"]["injected"] = True
+    rooted = json.loads(store.get("zarr.json").decode())
+    assert "injected" not in rooted["attributes"]
+
+
+def test_consolidate_metadata_uses_fresh_metadata():
+    # If a zarr.json was modified in the store after the group was opened,
+    # the fresh content is consolidated, and never clobbered with the stale
+    store = create_test_zarr()
+    group = open_zarr(store)  # the tree of this object is now stale
+    assert "fresh" not in group["sub"].attributes
+
+    # Modify the sub-group's metadata directly in the store
+    sub_meta = json.loads(store.get("sub/zarr.json").decode())
+    sub_meta["attributes"] = {"fresh": True}
+    store.set("sub/zarr.json", json.dumps(sub_meta, indent=4).encode())
+
+    # Non-recursive: the new attributes appear in the consolidated entry,
+    # and the sub-group's zarr.json is untouched
+    returned = consolidate_metadata(group)
+    assert returned["metadata"]["sub"]["attributes"] == {"fresh": True}
+    sub_meta = json.loads(store.get("sub/zarr.json").decode())
+    assert "consolidated_metadata" not in sub_meta
+    assert sub_meta["attributes"] == {"fresh": True}
+
+    # Recursive mode: the sub-group's zarr.json is re-written, but based on
+    # the fresh content (the stale attributes are NOT written back!)
+    consolidate_metadata(group, recursive=True)
+    sub_meta = json.loads(store.get("sub/zarr.json").decode())
+    assert sub_meta["attributes"] == {"fresh": True}
+    assert "consolidated_metadata" in sub_meta
+    assert sub_meta["consolidated_metadata"]["kind"] == "auto"
+
+
+def test_consolidate_recursive_failure_leaves_top_untouched():
+    # If a sub-group write fails during recursive consolidation, the top
+    # zarr.json is not written at all (the top is written last), so the
+    # store never carries a top-level promise that something else lacks.
+    store = FailOnSetStore()
+    create_test_zarr(store)
+
+    group = open_zarr(store)
+    consolidate_metadata(group)  # Non-recursive is fine
+    store.fail_on_key = "sub/group2/zarr.json"  # enable the failure
+    before = _store_snapshot(store)
+
+    with pytest.raises(IOError, match="simulated failure"):
+        consolidate_metadata(group, recursive=True)
+
+    # The sub-group that failed to write is simply not consolidated ...
+    group2_meta = json.loads(store.get("sub/group2/zarr.json").decode())
+    assert "consolidated_metadata" not in group2_meta
+    # ... and the top is fully unchanged (byte-identical)
+    after = _store_snapshot(store)
+    changed = [key for key in before if before[key] != after[key]]
+    assert changed == ["sub/zarr.json"]  # the sub written before the failure
+    assert json.loads(store.get("zarr.json").decode()) == json.loads(before["zarr.json"])
+
+    # The damage is recoverable: after solving the write problem,
+    # consolidation succeeds and everything is consistent again
+    store.fail_on_key = None
+    consolidate_metadata(open_zarr(store), recursive=True)
+    for path in ["zarr.json", "sub/zarr.json", "sub/group2/zarr.json"]:
+        meta = json.loads(store.get(path).decode())
+        assert meta["consolidated_metadata"]["kind"] == "auto"
+        assert isinstance(meta["consolidated_metadata"]["metadata"], dict)
+
+
+def test_consolidate_attributes_named_consolidated():
+    # User data that happens to be named "consolidated_metadata" (inside
+    # attributes) is preserved; only the top-level key is replaced
+    attributes = {"note": "user data", "consolidated_metadata": {"user": "data"}}
+    ZarrGroup.create(store := MemoryStore(), "", attributes=attributes)
+    ZarrGroup.create(store, "sub", attributes=attributes)
+
+    consolidate_metadata(open_zarr(store), recursive=True)
+
+    for path in ["", "sub"]:
+        meta = json.loads(store.get(f"{path}/zarr.json".lstrip("/")).decode())
+        assert meta["attributes"]["consolidated_metadata"] == {"user": "data"}
+        assert meta["consolidated_metadata"]["kind"] == "auto"
+    # The sub-group's entry in the top-level consolidation contains the
+    # user's attributes too
+    root_meta = json.loads(store.get("zarr.json").decode())
+    assert (
+        root_meta["consolidated_metadata"]["metadata"]["sub"]["attributes"][
+            "consolidated_metadata"
+        ]
+        == {"user": "data"}
+    )
+
+
+def test_consolidate_unicode_names():
+    store = MemoryStore()
+    ZarrGroup.create(store, "", attributes={"label": "ünïcödé 🌍"})
+    ZarrArray.create(store, "λ-array", (8, 6), "uint16")
+    ZarrGroup.create(store, "λ-group", attributes={"label": "gr"})
+    ZarrGroup.create(store, "λ-group/sub", attributes={"emoji": "🌍"})
+
+    returned = consolidate_metadata(open_zarr(store))
+
+    assert list(returned["metadata"].keys()) == ["λ-array", "λ-group", "λ-group/sub"]
+    root_meta = json.loads(store.get("zarr.json").decode())
+    assert root_meta["attributes"] == {"label": "ünïcödé 🌍"}
+    assert root_meta["consolidated_metadata"]["metadata"]["λ-group"]["attributes"] == {
+        "label": "gr"
+    }
+    assert root_meta["consolidated_metadata"]["metadata"]["λ-group/sub"][
+        "attributes"
+    ] == {"emoji": "🌍"}
+
+    # The file still opens, and the consolidated entry matches a fresh read
+    group = open_zarr(store)
+    assert group["λ-group/sub"].attributes == {"emoji": "🌍"}
+    assert (
+        returned["metadata"]["λ-array"]
+        == json.loads(store.get("λ-array/zarr.json").decode())
+    )
 
 
 def test_consolidate_metadata_empty():
