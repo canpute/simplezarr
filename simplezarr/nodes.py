@@ -31,6 +31,9 @@ def open_zarr(store: ReadableStore, path: str = "") -> ZarrNode:
     ``ZarrGroup`` or a ``ZarrArray``. The arrays are the leaf nodes. When
     opening a Zarr file, it may be a single array, or a group containing
     multiple arrays.
+
+    When the group's zarr.json contains consolidated metadata, the whole
+    tree is resolved from that single request, without a store request per node.
     """
     return ZarrNode._from_path(store, path)
 
@@ -52,6 +55,9 @@ class ZarrNode:
         store: ReadableStore | ListableStore | WritableStore,
         path: str,
         metadata: dict | None = None,
+        use_consolidated: bool = True,
+        *,
+        _consolidated: dict | None = None,
     ):
         # Check path
         if not isinstance(path, str):
@@ -66,6 +72,15 @@ class ZarrNode:
         self._path = path
         self._name = self._path.rsplit("/", 1)[-1]
 
+        # The metadata of all descending nodes, as a mapping of relative
+        # paths to node metadata, and only set when the zarr.json has
+        # consolidated metadata (see utils/consolidate.py). The children
+        # can then be resolved without any store request. When
+        # ``use_consolidated`` is False, consolidated metadata is ignored
+        # (also in descending nodes), e.g. when re-consolidating.
+        self._use_consolidated = use_consolidated
+        self._consolidated = _consolidated
+
         assert isinstance(metadata, dict)
         self._metadata = metadata
         self._attributes = {}
@@ -77,7 +92,9 @@ class ZarrNode:
         return self._one_line_repr()
 
     @classmethod
-    def _from_path(cls, store: BaseStore, path: str) -> ZarrNode:
+    def _from_path(
+        cls, store: BaseStore, path: str, *, use_consolidated: bool = True
+    ) -> ZarrNode:
         json_text = store.get(join(path, "zarr.json")).decode()
         metadata = json.loads(json_text)
 
@@ -86,7 +103,18 @@ class ZarrNode:
 
         node_type = metadata["node_type"]
         if node_type == "group":
-            return ZarrGroup(store, path, metadata=metadata)
+            # Pick up the consolidated metadata (if present), so that the
+            # children can be resolved from it without store requests.
+            consolidated = (
+                _get_consolidated_map(metadata, path) if use_consolidated else None
+            )
+            return ZarrGroup(
+                store,
+                path,
+                metadata=metadata,
+                use_consolidated=use_consolidated,
+                _consolidated=consolidated,
+            )
         elif node_type == "array":
             return ZarrArray(store, path, metadata=metadata)
         else:  # no-cover
@@ -129,6 +157,92 @@ class ZarrNode:
 
     def _init_node(self):
         raise NotImplementedError()
+
+
+def _get_consolidated_map(metadata: dict, path: str) -> dict | None:
+    """Get the consolidated metadata map of a group's metadata, or None if absent.
+
+    The map is a mapping of relative paths to the metadata of the node at
+    that path (as written by ``simplezarr.utils.consolidate.consolidate_metadata()``).
+    Per the v3 spec, "inline" is the only supported kind (the field is
+    reserved for future use); a missing kind or "auto" (written by earlier
+    versions of this library) is also accepted. Raises an error for other
+    kinds, or if the entry is malformed.
+    """
+    consolidated = metadata.get("consolidated_metadata", None)
+    if consolidated is None:
+        return None
+    if not (
+        isinstance(consolidated, dict)
+        and isinstance(consolidated.get("metadata"), dict)
+    ):
+        raise RuntimeError(
+            f"The zarr.json of {path!r} has a malformed 'consolidated_metadata' entry."
+        )
+    kind = consolidated.get("kind", None)
+    if kind not in ("inline", None, "auto"):
+        raise RuntimeError(
+            f"The zarr.json of {path!r} has consolidated metadata of kind {kind!r}, "
+            f"which is not supported (re-consolidate the file to use it)."
+        )
+    return consolidated["metadata"]
+
+
+def _children_from_consolidated(store, path: str, consolidated: dict) -> dict:
+    """Create the child nodes of a group from a consolidated metadata map.
+
+    No store requests are made; the child groups get their part of the map,
+    so their children are resolved from it as well. The map is trusted, but
+    malformed entries raise an error (better than silently skipping nodes).
+    """
+    # Split the (relative-path) keys into first-level entries and sub-maps
+    node_meta = {}  # name -> metadata of the node with that name
+    sub_maps = {}  # name ->  map for the group with that name
+    for key, meta in consolidated.items():
+        name, _, rest = key.partition("/")
+        if not name or not isinstance(meta, dict):
+            raise RuntimeError(
+                f"Malformed key {key!r} in the consolidated metadata of {path!r}."
+            )
+        if rest:
+            sub_maps.setdefault(name, {})[rest] = meta
+        else:
+            if name in node_meta:
+                raise RuntimeError(
+                    f"Duplicate key {key!r} in the consolidated metadata of {path!r}."
+                )
+            node_meta[name] = meta
+
+    # Create the nodes
+    children = {}
+    for name, meta in node_meta.items():
+        node_type = meta.get("node_type", None)
+        sub_map = sub_maps.pop(name, {})
+        if node_type == "group":
+            children[name] = ZarrGroup(
+                store, join(path, name), metadata=meta, _consolidated=sub_map
+            )
+        elif node_type == "array":
+            if sub_map:
+                raise RuntimeError(
+                    f"The consolidated metadata of {path!r} lists nodes below "
+                    f"the array {name!r}."
+                )
+            children[name] = ZarrArray(store, join(path, name), metadata=meta)
+        else:
+            raise RuntimeError(
+                f"Unexpected node type {node_type!r} at {join(path, name)!r} in the "
+                f"consolidated metadata of {path!r}."
+            )
+
+    # Any remaining sub-maps are for nodes that have no entry of their own
+    if sub_maps:
+        raise RuntimeError(
+            f"The consolidated metadata of {path!r} lists nodes below non-existing "
+            f"node(s) {','.join(sorted(sub_maps))!r}."
+        )
+
+    return children
 
 
 class ZarrGroup(ZarrNode):
@@ -185,9 +299,17 @@ class ZarrGroup(ZarrNode):
         self._attributes = meta.get("attributes", {})
 
     def _init_node(self):
-        # Assume ListableStore
+        # When we have consolidated metadata, resolve all children from it,
+        # so that opening this group costs no further store requests. The
+        # consolidated metadata is trusted as-is; re-consolidate after
+        # modifying the file (or open via a fresh store) to see the changes.
+        if self._consolidated is not None:
+            self._children = _children_from_consolidated(
+                self._store, self._path, self._consolidated
+            )
+            return
 
-        # todo: use consolidated metadata
+        # Assume ListableStore
         # todo: use list_dir only lazily
 
         n = len(self._path)
@@ -199,7 +321,11 @@ class ZarrGroup(ZarrNode):
         self._children = {}
         for name in dir_names:
             try:
-                node = ZarrNode._from_path(self._store, f"{self._path}/{name}")
+                node = ZarrNode._from_path(
+                    self._store,
+                    f"{self._path}/{name}",
+                    use_consolidated=self._use_consolidated,
+                )
             except FileNotFoundError:
                 continue  # zarr.json not present, so not a Zarr node
             else:
